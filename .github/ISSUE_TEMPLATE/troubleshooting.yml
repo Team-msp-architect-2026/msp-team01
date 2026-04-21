@@ -1,0 +1,118 @@
+name: 🐛 트러블슈팅 (Troubleshooting)
+description: 장애/에러/버그/예상치 못한 동작을 기록하고 해결 과정을 공유합니다.
+title: "[Bug] "
+labels: ["type:bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🐛 트러블슈팅 리포트
+        문제를 **재현 가능**하게 기록하면 해결과 회고가 훨씬 빨라집니다.
+        해결 후 "해결 방법" 섹션을 꼭 업데이트 해주세요 — 다음 기수에게 중요한 자산입니다.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 📌 현상 요약
+      description: 한 문장으로 무슨 일이 일어났는지
+      placeholder: "예) ArgoCD에서 Application Sync 시 ImagePullBackOff 발생"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 🖥️ 환경 정보
+      value: |
+        - 클러스터: (예: k3s v1.28.x)
+        - 노드: (cp1 / w1 / ai2 중)
+        - 네임스페이스:
+        - 관련 컴포넌트/버전:
+        - 발생 시각:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 🔁 재현 순서
+      description: 1, 2, 3... 순서대로 명령어/동작 기록
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: ✅ 기대 동작
+      placeholder: "무엇이 일어나야 했는가"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: ❌ 실제 동작
+      description: 에러 로그/스크린샷 첨부
+      placeholder: |
+        ```
+        (로그 또는 스택 트레이스 붙여넣기)
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 🔍 시도한 것들
+      description: 어떤 접근을 시도했고 결과가 어땠는지
+      value: |
+        - [ ]
+        - [ ]
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 🚨 심각도
+      options:
+        - S0 (서비스 전면 중단)
+        - S1 (핵심 기능 장애)
+        - S2 (일부 기능 장애)
+        - S3 (경미/우회 가능)
+      default: 2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 🗂️ 영역
+      multiple: true
+      options:
+        - k8s
+        - gitops
+        - monitoring
+        - ci-cd
+        - app-frontend
+        - app-backend
+        - ai
+        - security
+        - network
+        - storage
+    validations:
+      required: true
+
+  - type: textarea
+    id: resolution
+    attributes:
+      label: 💡 해결 방법 (해결 후 작성)
+      description: 원인 / 해결 / 재발 방지책을 기록하면 팀 자산이 됩니다.
+      value: |
+        **근본 원인:**
+
+        **해결 방법:**
+
+        **재발 방지:**
