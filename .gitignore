@@ -1,111 +1,34 @@
-# ─────────────────────────────────────
-# OS / IDE
-# ─────────────────────────────────────
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-*.swp
-*~
-
-# ─────────────────────────────────────
-# 🔒 Secrets (절대 커밋 금지)
-# ─────────────────────────────────────
+# 환경변수 — 절대 커밋 금지
 .env
-.env.*
-!.env.example
-*.pem
-*.key
-*.crt
-*.p12
-*.pfx
-kubeconfig
-kubeconfig.*
-.kube/
-**/secrets/
-**/credentials*
-*-sealed.yaml.bak
+.env.local
+.env.*.local
 
-# ─────────────────────────────────────
+# Terraform
+*.tfvars
+*.tfvars.json
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+.terraform.lock.hcl
+
 # Python
-# ─────────────────────────────────────
-__pycache__/
-*.py[cod]
-*.egg-info/
 .venv/
-venv/
+__pycache__/
+*.pyc
+*.pyo
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-htmlcov/
-.coverage
 
-# ─────────────────────────────────────
-# Node / JavaScript
-# ─────────────────────────────────────
+# Node.js
 node_modules/
 dist/
 build/
 .next/
-.nuxt/
-coverage/
-*.log
-npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
 
-# ─────────────────────────────────────
-# Java / JVM
-# ─────────────────────────────────────
-target/
-*.class
-*.jar
-*.war
-.gradle/
-out/
-.mvn/wrapper/maven-wrapper.jar
+# IDE
+.vscode/
+.idea/
+*.swp
 
-# ─────────────────────────────────────
-# Go
-# ─────────────────────────────────────
-*.exe
-*.test
-*.out
-vendor/
-
-# ─────────────────────────────────────
-# Terraform / IaC
-# ─────────────────────────────────────
-.terraform/
-*.tfstate
-*.tfstate.backup
-*.tfvars
-!*.tfvars.example
-.terraformrc
-
-# ─────────────────────────────────────
-# Kubernetes / Helm
-# ─────────────────────────────────────
-charts/*.tgz
-values.local.yaml
-**/*.local.yaml
-
-# ─────────────────────────────────────
-# Data / Model (대용량 — Git LFS 사용)
-# ─────────────────────────────────────
-*.csv
-*.parquet
-*.h5
-*.pkl
-*.pt
-*.onnx
-!sample/*.csv
-data/raw/
-models/weights/
-
-# ─────────────────────────────────────
-# Misc
-# ─────────────────────────────────────
-tmp/
-*.bak
-*.tmp
+# OS
+.DS_Store
+Thumbs.db
