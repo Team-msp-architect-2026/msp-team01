@@ -1,0 +1,58 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - 'backend/**'
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'backend/**'
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: autoops_test
+          POSTGRES_USER: autoops
+          POSTGRES_PASSWORD: test_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run health check
+        run: |
+          cd backend
+          python -c "from app.main import app; print('Import OK')"
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: autoops_test
+          DB_USER: autoops
+          DB_PASSWORD: test_password
+          COGNITO_USER_POOL_ID: placeholder
+          COGNITO_CLIENT_ID: placeholder
+          GEMINI_API_KEY: placeholder
