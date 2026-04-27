@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Cognito
     cognito_user_pool_id: str = ""
     cognito_client_id: str = ""
+    skip_assume_role: bool = False   # 로컬 개발용 AssumeRole bypass
 
     @property
     def database_url(self) -> str:
