@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.aws_account import AWSAccount
 from app.models.user import User
@@ -34,49 +35,59 @@ def connect_account(
     ExternalId를 user_id로 사용하는 이유:
     Confused Deputy 공격 방지 — 다른 사용자의 Role을 연동할 수 없도록 한다.
     사용자가 CloudFormation으로 AutoOpsRole 생성 시 ExternalId에 user_id가 자동 주입된다.
+
+    로컬 개발 시 SKIP_ASSUME_ROLE=true:
+    AutoOps 서버 계정 = 사용자 계정 동일 + MFA 정책으로 AssumeRole 불가
+    → ARN에서 계정 ID 직접 추출하여 bypass
+    ECS Fargate 배포 시 SKIP_ASSUME_ROLE=false:
+    Task IAM Role로 MFA 없이 AssumeRole 정상 동작
     """
     sts = boto3.client("sts", region_name="us-west-2")
 
-    try:
-        assumed = sts.assume_role(
-            RoleArn=request.role_arn,
-            RoleSessionName="autoops-verification",
-            ExternalId=current_user.user_id,   # Confused Deputy 방지
-            DurationSeconds=900,               # 15분 (검증용 최소 시간)
-        )
-    except ClientError as e:
-        error_code = e.response["Error"]["Code"]
-        if error_code in ("AccessDenied", "InvalidClientTokenId"):
+    if settings.skip_assume_role:
+        # 로컬 개발용 bypass
+        # ARN 형식: arn:aws:iam::{account_id}:role/AutoOpsRole
+        aws_account_id = request.role_arn.split(":")[4]
+    else:
+        # 실제 AssumeRole (ECS Fargate 배포 시)
+        try:
+            assumed = sts.assume_role(
+                RoleArn=request.role_arn,
+                RoleSessionName="autoops-verification",
+                ExternalId=current_user.user_id,
+                DurationSeconds=900,
+            )
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code in ("AccessDenied", "InvalidClientTokenId"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "AWS_ROLE_ERROR",
+                        "message": "IAM Role Assume에 실패했습니다. Role ARN과 ExternalId를 확인하세요.",
+                    },
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": "AWS_ROLE_ERROR",
-                    "message": "IAM Role Assume에 실패했습니다. Role ARN과 ExternalId를 확인하세요.",
-                },
+                detail={"code": "AWS_ROLE_ERROR", "message": str(e)},
             )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "AWS_ROLE_ERROR", "message": str(e)},
-        )
 
-    # 임시 자격증명으로 실제 계정 ID 확인
-    temp_creds = assumed["Credentials"]
-    temp_sts = boto3.client(
-        "sts",
-        aws_access_key_id=temp_creds["AccessKeyId"],
-        aws_secret_access_key=temp_creds["SecretAccessKey"],
-        aws_session_token=temp_creds["SessionToken"],
-        region_name="us-west-2",
-    )
-
-    try:
-        identity = temp_sts.get_caller_identity()
-        aws_account_id = identity["Account"]
-    except ClientError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "AWS_ROLE_ERROR", "message": "연동된 계정 정보를 확인할 수 없습니다."},
+        temp_creds = assumed["Credentials"]
+        temp_sts = boto3.client(
+            "sts",
+            aws_access_key_id=temp_creds["AccessKeyId"],
+            aws_secret_access_key=temp_creds["SecretAccessKey"],
+            aws_session_token=temp_creds["SessionToken"],
+            region_name="us-west-2",
         )
+        try:
+            identity = temp_sts.get_caller_identity()
+            aws_account_id = identity["Account"]
+        except ClientError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "AWS_ROLE_ERROR", "message": "연동된 계정 정보를 확인할 수 없습니다."},
+            )
 
     # 이미 연동된 계정 여부 확인
     existing = db.query(AWSAccount).filter(
@@ -114,7 +125,6 @@ def connect_account(
             "connected_at": account.connected_at.isoformat(),
         },
     }
-
 
 @router.get("")
 def list_accounts(
