@@ -26,11 +26,11 @@ PyJWT==2.9.0
 # Validation
 pydantic==2.9.2
 pydantic-settings==2.6.0
+pydantic[email]==2.9.2
 
 # HTTP
 httpx==0.28.0
 
 # Utilities
 python-dotenv==1.0.1
-
 cryptography==43.0.3
