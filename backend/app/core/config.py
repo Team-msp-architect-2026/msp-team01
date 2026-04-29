@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_default_region: str = "us-west-2"
+    aws_session_token: str = ""
 
     # AI
     gemini_api_key: str = ""
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     cognito_client_id: str = ""
     skip_assume_role: bool = False   # 로컬 개발용 AssumeRole bypass
 
+    # infracost
+    infracost_api_key: str = ""
+
     @property
     def database_url(self) -> str:
         return (
@@ -34,6 +38,6 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
-
+        extra = "ignore"
 
 settings = Settings()
