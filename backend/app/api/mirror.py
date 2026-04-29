@@ -283,7 +283,16 @@ def failover(
             DRPackage.is_latest   == True,
         ).first()
 
-        if not latest_package or latest_package.status != "ready":
+        if not latest_package:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "NOT_FOUND",
+                    "message": "DR Package가 존재하지 않습니다. 동기화를 먼저 실행하세요.",
+                },
+            )
+
+        if latest_package.status != "ready":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -291,7 +300,7 @@ def failover(
                     "message": (
                         "DR Package가 준비되지 않았습니다. "
                         "DB 스냅샷 Export 완료 후 페일오버를 실행하세요. "
-                        f"현재 상태: {latest_package.status if latest_package else 'not_ready'}"
+                        f"현재 상태: {latest_package.status}"
                     ),
                 },
             )
