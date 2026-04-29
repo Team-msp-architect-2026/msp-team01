@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_default_region: str = "us-west-2"
+    aws_session_token: str = ""
 
     # AI
     gemini_api_key: str = ""
