@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     gcp_project_id: str = ""
     gcp_region: str = "us-west1"
 
+    # infracost
+    infracost_api_key: str = ""
+
     @property
     def database_url(self) -> str:
         return (
