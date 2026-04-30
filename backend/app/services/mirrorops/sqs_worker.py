@@ -20,11 +20,16 @@ async def start_sqs_worker():
 
     while True:
         try:
-            resp = sqs.receive_message(
-                QueueUrl             = queue_url,
-                MaxNumberOfMessages  = 1,
-                WaitTimeSeconds      = 20,       # Long Polling
-                VisibilityTimeout    = 300,      # 5분 디바운싱 (§5-1)
+            # 동기 boto3 호출을 별도 스레드로 분리
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
+                None,
+                lambda: sqs.receive_message(
+                    QueueUrl            = queue_url,
+                    MaxNumberOfMessages = 1,
+                    WaitTimeSeconds     = 20,
+                    VisibilityTimeout   = 300,
+                )
             )
 
             messages = resp.get("Messages", [])
