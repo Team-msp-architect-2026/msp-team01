@@ -35,11 +35,18 @@ class Settings(BaseSettings):
     # infracost
     infracost_api_key: str = ""
 
+    # ecs
+    skip_ecs_task: bool = False
+    internal_secret: str = "autoops-internal-secret"
+
     @property
     def database_url(self) -> str:
         return (
             f"postgresql+psycopg2://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+    
+    platform_subnet_ids: str = ""
+    platform_sg_ids: str = ""
 
 settings = Settings()
