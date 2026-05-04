@@ -2,7 +2,7 @@
 'use client'
 
 import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { apiClient } from '@/lib/api'
 import { WizardLayout } from '@/components/craftops/WizardLayout'
 import { IntentAnalysis } from '@/components/craftops/IntentAnalysis'
@@ -12,31 +12,36 @@ import { Button } from '@/components/ui/button'
 type WizardPhase = 'project-create' | 'step1' | '2-1' | '2-2' | '2-3' | '2-4' | '2-5' | '2-6' | 'validate'
 
 export default function NewProjectPage() {
-  const router = useRouter()
+  const router       = useRouter()
+  const searchParams = useSearchParams()
+
+  // [수정] 기존 project_id가 쿼리파라미터로 오면 project-create 단계 건너뜀
+  const existingProjectId = searchParams.get('project_id')
 
   const [projectForm, setProjectForm] = useState({
     name: '', prefix: '', environment: 'prod', region: 'us-west-2',
   })
-  const [projectId, setProjectId] = useState<string | null>(null)
-
-  const [phase, setPhase] = useState<WizardPhase>('project-create')
+  const [projectId, setProjectId]     = useState<string | null>(existingProjectId)
+  const [phase, setPhase]             = useState<WizardPhase>(
+    existingProjectId ? 'step1' : 'project-create'
+  )
   const [completedSteps, setCompletedSteps] = useState<string[]>([])
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [namingPreview, setNamingPreview] = useState<string[]>([])
-  const [stepConfigs, setStepConfigs] = useState<Record<string, Record<string, unknown>>>({})
+  const [isSubmitting, setIsSubmitting]     = useState(false)
+  const [namingPreview, setNamingPreview]   = useState<string[]>([])
+  const [stepConfigs, setStepConfigs]       = useState<Record<string, Record<string, unknown>>>({})
 
   const handleCreateProject = async () => {
     setIsSubmitting(true)
     try {
       const accRes = await apiClient.get('/api/accounts')
-      const acc = accRes.data.data[0]
+      const acc    = accRes.data.data[0]
 
       const projRes = await apiClient.post('/api/projects', {
-        name: projectForm.name,
-        account_id: acc.account_id,
-        prefix: projectForm.prefix,
+        name:        projectForm.name,
+        account_id:  acc.account_id,
+        prefix:      projectForm.prefix,
         environment: projectForm.environment,
-        region: projectForm.region,
+        region:      projectForm.region,
       })
       setProjectId(projRes.data.data.project_id)
       setPhase('step1')
@@ -49,7 +54,7 @@ export default function NewProjectPage() {
     if (!projectId) return
     setIsSubmitting(true)
     try {
-      const res = await apiClient.post('/api/craft/config', {
+      const res  = await apiClient.post('/api/craft/config', {
         project_id: projectId,
         step,
         config,
@@ -72,44 +77,63 @@ export default function NewProjectPage() {
     }
   }
 
+  // ── project-create 단계 ──────────────────────────────────────
   if (phase === 'project-create') {
     return (
-      <div className="p-6 max-w-lg mx-auto space-y-4">
-        <h1 className="text-2xl font-bold">새 인프라 생성</h1>
-        <Input
-          placeholder="프로젝트 이름"
-          value={projectForm.name}
-          onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
-        />
-        <Input
-          placeholder="prefix (예: DD)"
-          value={projectForm.prefix}
-          onChange={(e) => setProjectForm((f) => ({ ...f, prefix: e.target.value }))}
-        />
-        <select
-          className="w-full border rounded px-3 py-2 text-sm"
-          value={projectForm.environment}
-          onChange={(e) => setProjectForm((f) => ({ ...f, environment: e.target.value }))}
+      <div className="px-6 py-8 md:px-12 md:py-12 max-w-lg">
+        <button
+          onClick={() => router.push('/dashboard')}
+          className="text-[#9ca3af] hover:text-white text-sm transition-colors mb-6 block"
         >
-          <option value="prod">prod</option>
-          <option value="staging">staging</option>
-          <option value="dev">dev</option>
-        </select>
-        <Button
-          className="w-full bg-teal-600 hover:bg-teal-700"
-          onClick={handleCreateProject}
-          disabled={isSubmitting || !projectForm.name || !projectForm.prefix}
-        >
-          {isSubmitting ? '생성 중...' : '다음 →'}
-        </Button>
+          ← 대시보드
+        </button>
+        <h1 className="text-2xl font-bold mb-1">새 프로젝트 생성</h1>
+        <p className="text-[#9ca3af] text-sm mb-6">
+          프로젝트를 생성한 후 인프라 설계 단계로 이동합니다.
+        </p>
+        <div className="space-y-3">
+          <Input
+            placeholder="프로젝트 이름"
+            value={projectForm.name}
+            onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
+          />
+          <Input
+            placeholder="prefix (예: TS)"
+            value={projectForm.prefix}
+            onChange={(e) => setProjectForm((f) => ({ ...f, prefix: e.target.value }))}
+          />
+          <select
+            className="w-full border rounded px-3 py-2 text-sm bg-black border-white/10 text-white"
+            value={projectForm.environment}
+            onChange={(e) => setProjectForm((f) => ({ ...f, environment: e.target.value }))}
+          >
+            <option value="prod">prod</option>
+            <option value="staging">staging</option>
+            <option value="dev">dev</option>
+          </select>
+          <Button
+            className="w-full bg-teal-600 hover:bg-teal-700"
+            onClick={handleCreateProject}
+            disabled={isSubmitting || !projectForm.name || !projectForm.prefix}
+          >
+            {isSubmitting ? '생성 중...' : '프로젝트 생성 →'}
+          </Button>
+        </div>
       </div>
     )
   }
 
+  // ── Step 1: Intent Analysis ──────────────────────────────────
   if (phase === 'step1' && projectId) {
     return (
-      <div className="p-6 max-w-2xl mx-auto">
-        <h1 className="text-2xl font-bold mb-4">Step 1 — 요구사항 분석</h1>
+      <div className="px-6 py-8 md:px-12 md:py-12 max-w-2xl">
+        <button
+          onClick={() => router.push(`/projects/${projectId}`)}
+          className="text-[#9ca3af] hover:text-white text-sm transition-colors mb-6 block"
+        >
+          ← 프로젝트
+        </button>
+        <h1 className="text-2xl font-bold mb-6">Step 1 — 요구사항 분석</h1>
         <IntentAnalysis
           projectId={projectId}
           onComplete={() => setPhase('2-1')}
@@ -118,6 +142,7 @@ export default function NewProjectPage() {
     )
   }
 
+  // ── Step 2-1 ─────────────────────────────────────────────────
   if (phase === '2-1') {
     return (
       <div className="p-6">
@@ -127,9 +152,9 @@ export default function NewProjectPage() {
           sidekick="프로덕션 환경이므로 Multi-AZ 구성을 권장합니다."
           onNext={() =>
             handleSaveStep('2-1', {
-              prefix: projectForm.prefix,
-              environment: projectForm.environment,
-              region: projectForm.region,
+              prefix:       projectForm.prefix,
+              environment:  projectForm.environment,
+              region:       projectForm.region,
               project_name: projectForm.name,
             })
           }
@@ -168,6 +193,7 @@ export default function NewProjectPage() {
     )
   }
 
+  // ── Step 2-2 ─────────────────────────────────────────────────
   if (phase === '2-2') {
     return (
       <div className="p-6">
@@ -205,6 +231,7 @@ export default function NewProjectPage() {
     )
   }
 
+  // ── Step 2-3 ─────────────────────────────────────────────────
   if (phase === '2-3') {
     return (
       <div className="p-6">
@@ -227,6 +254,7 @@ export default function NewProjectPage() {
     )
   }
 
+  // ── Step 2-4 ─────────────────────────────────────────────────
   if (phase === '2-4') {
     return (
       <div className="p-6">
@@ -260,6 +288,7 @@ export default function NewProjectPage() {
     )
   }
 
+  // ── Step 2-5 ─────────────────────────────────────────────────
   if (phase === '2-5') {
     return (
       <div className="p-6">
@@ -274,8 +303,8 @@ export default function NewProjectPage() {
           onPrev={() => setPhase('2-4')}
           onNext={() =>
             handleSaveStep('2-5', {
-              vcpu: 1,
-              memory: 2048,
+              vcpu:            1,
+              memory:          2048,
               container_image: (stepConfigs['2-5']?.container_image as string) || '',
             })
           }
@@ -310,6 +339,7 @@ export default function NewProjectPage() {
     )
   }
 
+  // ── Step 2-6 ─────────────────────────────────────────────────
   if (phase === '2-6') {
     const isProd = projectForm.environment === 'prod'
     return (

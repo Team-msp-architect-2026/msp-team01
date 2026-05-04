@@ -116,10 +116,10 @@ export default function ProjectDetailPage() {
           {/* CraftOps 액션 */}
           <div className="space-y-2 pt-2 border-t border-white/8">
 
-            {/* created → 기존 project_id 가지고 위저드 Step 1부터 시작 */}
+            {/* created → 첫 배포 시작 */}
             {project.status === 'created' && (
               <button
-                onClick={() => router.push(`/projects/new?project_id=${projectId}`)}
+                onClick={() => router.push(`/projects/${projectId}/validate`)}
                 className="w-full text-left px-4 py-3 rounded-2xl text-sm font-medium bg-white/5 hover:bg-white/10 transition-colors"
               >
                 🚀 배포 시작
