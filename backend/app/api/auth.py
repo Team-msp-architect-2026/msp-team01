@@ -2,6 +2,7 @@
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from app.core.config import settings
@@ -9,6 +10,7 @@ from app.core.database import get_db
 from app.models.user import User
 
 router = APIRouter()
+security = HTTPBearer()
 
 
 # ── Request / Response 스키마 ──────────────────────────────────────
@@ -16,24 +18,27 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
-
 class LoginResponse(BaseModel):
     access_token: str
     refresh_token: str
     expires_in: int
     user: dict
 
-
 class RefreshRequest(BaseModel):
     refresh_token: str
 
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+
+class ConfirmRequest(BaseModel):
+    email: str
+    code: str
+
+
 @router.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
-    """
-    Cognito USER_PASSWORD_AUTH 흐름으로 로그인한다.
-    성공 시 access_token(1시간), refresh_token(30일) 반환.
-    users 테이블에 사용자 정보를 upsert한다.
-    """
     cognito = boto3.client("cognito-idp", region_name=settings.aws_default_region)
 
     try:
@@ -61,7 +66,6 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     access_token = auth_result["AccessToken"]
     refresh_token = auth_result["RefreshToken"]
 
-    # access_token에서 사용자 정보 추출 (Cognito GetUser 호출)
     user_info = cognito.get_user(AccessToken=access_token)
     attributes = {attr["Name"]: attr["Value"] for attr in user_info["UserAttributes"]}
 
@@ -69,7 +73,6 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     email = attributes["email"]
     name = attributes.get("name", email.split("@")[0])
 
-    # users 테이블 upsert
     user = db.query(User).filter(User.cognito_sub == cognito_sub).first()
     if not user:
         user = User(
@@ -81,7 +84,6 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(user)
 
-    # 연동된 AWS 계정 여부 확인
     from app.models.aws_account import AWSAccount
     aws_connected = db.query(AWSAccount).filter(
         AWSAccount.user_id == user.user_id,
@@ -103,35 +105,23 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         },
     }
 
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-security = HTTPBearer()
-
 
 @router.post("/logout")
 def logout(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
-    """
-    Cognito GlobalSignOut으로 해당 사용자의 모든 토큰을 무효화한다.
-    """
     cognito = boto3.client("cognito-idp", region_name=settings.aws_default_region)
 
     try:
         cognito.global_sign_out(AccessToken=credentials.credentials)
     except ClientError:
-        # 이미 만료된 토큰이어도 로그아웃 성공으로 처리
         pass
 
     return {"success": True, "message": "로그아웃 되었습니다."}
 
-# backend/app/api/auth.py (이어서)
 
 @router.post("/refresh")
 def refresh_token(request: RefreshRequest):
-    """
-    refresh_token으로 새 access_token을 발급한다.
-    """
     cognito = boto3.client("cognito-idp", region_name=settings.aws_default_region)
 
     try:
@@ -160,3 +150,58 @@ def refresh_token(request: RefreshRequest):
             "expires_in": 3600,
         },
     }
+
+
+@router.post("/signup")
+def signup(request: SignupRequest):
+    cognito = boto3.client("cognito-idp", region_name=settings.aws_default_region)
+    try:
+        cognito.sign_up(
+            ClientId=settings.cognito_client_id,
+            Username=request.email,
+            Password=request.password,
+            UserAttributes=[
+                {"Name": "email", "Value": request.email},
+                {"Name": "name", "Value": request.name},
+            ]
+        )
+        return {"success": True, "data": {"message": "인증 코드가 이메일로 발송되었습니다."}}
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code == "UsernameExistsException":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "USER_EXISTS", "message": "이미 사용 중인 이메일입니다."}
+            )
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": str(e)}
+        )
+
+
+@router.post("/confirm")
+def confirm(request: ConfirmRequest):
+    cognito = boto3.client("cognito-idp", region_name=settings.aws_default_region)
+    try:
+        cognito.confirm_sign_up(
+            ClientId=settings.cognito_client_id,
+            Username=request.email,
+            ConfirmationCode=request.code,
+        )
+        return {"success": True, "data": {"message": "이메일 인증이 완료되었습니다."}}
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code == "CodeMismatchException":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "INVALID_CODE", "message": "인증 코드가 올바르지 않습니다."}
+            )
+        if error_code == "ExpiredCodeException":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "EXPIRED_CODE", "message": "인증 코드가 만료되었습니다."}
+            )
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": str(e)}
+        )
