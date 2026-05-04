@@ -30,7 +30,7 @@ export interface AWSAccount {
 }
 
 // 프로젝트
-export type ProjectStatus = 'created' | 'deploying' | 'completed' | 'failed'
+export type ProjectStatus = 'created' | 'deploying' | 'completed' | 'failed' | 'partial_failed'
 export type DRStatusValue = 'not_ready' | 'syncing' | 'ready'
 export type Environment = 'prod' | 'staging' | 'dev'
 

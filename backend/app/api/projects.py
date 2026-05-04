@@ -131,17 +131,56 @@ def delete_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    프로젝트를 삭제한다.
-    destroy_aws_resources=True 시 terraform destroy 실행 (Epic 4에서 구현).
-    현재는 DB 레코드만 삭제한다.
-    """
-    project = _get_project_or_404(project_id, current_user.user_id, db)
+    project = db.query(Project).filter(
+        Project.project_id == project_id,
+        Project.user_id == current_user.user_id
+    ).first()
 
-    if request.destroy_aws_resources:
-        # Epic 4 CraftOps 실행엔진 구현 후 연동
-        # 현재는 플래그만 확인하고 추후 terraform destroy job 실행
-        pass
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    from app.models.deployment import Deployment, DeploymentResource
+    from app.models.aws_resource import AWSResource
+    from app.models.gcp_mapping import GCPMapping
+    from app.models.sync_history import SyncHistory, DRPackage
+    from app.models.failover_history import FailoverHistory
+
+    # [FIX] failover_history 먼저 삭제 (NOT NULL FK 제약)
+    db.query(FailoverHistory).filter(
+        FailoverHistory.project_id == project_id
+    ).delete(synchronize_session=False)
+
+    # GCPMapping → AWSResource
+    aws_resources = db.query(AWSResource).filter(
+        AWSResource.project_id == project_id
+    ).all()
+    for r in aws_resources:
+        db.query(GCPMapping).filter(
+            GCPMapping.aws_resource_id == r.resource_id
+        ).delete(synchronize_session=False)
+    db.query(AWSResource).filter(
+        AWSResource.project_id == project_id
+    ).delete(synchronize_session=False)
+
+    # DeploymentResource → Deployment
+    deployments = db.query(Deployment).filter(
+        Deployment.project_id == project_id
+    ).all()
+    for d in deployments:
+        db.query(DeploymentResource).filter(
+            DeploymentResource.deployment_id == d.deployment_id
+        ).delete(synchronize_session=False)
+    db.query(Deployment).filter(
+        Deployment.project_id == project_id
+    ).delete(synchronize_session=False)
+
+    # 나머지
+    db.query(DRPackage).filter(
+        DRPackage.project_id == project_id
+    ).delete(synchronize_session=False)
+    db.query(SyncHistory).filter(
+        SyncHistory.project_id == project_id
+    ).delete(synchronize_session=False)
 
     db.delete(project)
     db.commit()
