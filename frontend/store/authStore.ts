@@ -1,4 +1,4 @@
-// frontend/store/authStore.ts
+// frontend/store/authStore.ts 수정
 import { create } from 'zustand'
 import { User } from '@/types'
 
@@ -10,11 +10,11 @@ interface AuthState {
   isAuthenticated: () => boolean
 }
 
-export const useAuthStore = create<AuthState>((set, get) => ({
+export const useAuthStore = create<AuthState>((set: (state: Partial<AuthState>) => void, get: () => AuthState) => ({
   user: null,
   accessToken: null,
 
-  setAuth: (user, token) => {
+  setAuth: (user: User, token: string) => {
     localStorage.setItem('access_token', token)
     localStorage.setItem('user', JSON.stringify(user))
     set({ user, accessToken: token })
