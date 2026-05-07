@@ -19,7 +19,6 @@ interface Props {
   onComplete: (result: AnalysisResult) => void
 }
 
-// §12-5 리소스 이름 매핑
 const RESOURCE_LABELS: Record<string, string> = {
   vpc:            'VPC + Subnet 4개 + IGW + NAT Gateway',
   security_group: 'Security Group 3개',
@@ -57,12 +56,11 @@ export function IntentAnalysis({ projectId, onComplete }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* §12-5: 자연어 입력 영역 */}
       <div className="space-y-2">
         <label className="text-sm font-medium">인프라 요구사항을 자연어로 입력하세요</label>
         <Textarea
           value={prompt}
-          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}   
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
           placeholder="예) 프로덕션용 Python API 서버, PostgreSQL DB, 오레곤 리전, 오토스케일링 필요"
           rows={4}
         />
@@ -88,15 +86,14 @@ export function IntentAnalysis({ projectId, onComplete }: Props) {
         </Alert>
       )}
 
-      {/* §12-5: AI 분석 결과 */}
       {result && (
-        <Card className="border-teal-200 bg-teal-50">
+        <Card className="border-white/8 bg-[#121214]">
           <CardContent className="p-4 space-y-3">
-            <p className="font-medium text-teal-800">── AI 분석 결과 ──</p>
+            <p className="font-medium text-[#9ca3af]">── AI 분석 결과 ──</p>
             <div className="space-y-1">
               {result.resources.map((r) => (
                 <div key={r} className="flex items-center gap-2 text-sm">
-                  <span className="text-green-600">✅</span>
+                  <span className="text-emerald-400">✅</span>
                   <span>{RESOURCE_LABELS[r] ?? r}</span>
                 </div>
               ))}

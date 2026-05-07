@@ -1,4 +1,4 @@
-// frontend/app/(auth)/login/page.tsx
+// frontend/app/(auth)/signup/page.tsx
 'use client'
 
 import { useState } from 'react'
@@ -7,48 +7,43 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { apiClient } from '@/lib/api'
-import { useAuthStore } from '@/store/authStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 
-const loginSchema = z.object({
+const signupSchema = z.object({
+  name: z.string().min(2, '이름은 2자 이상이어야 합니다.'),
   email: z.string().email('올바른 이메일을 입력하세요.'),
-  password: z.string().min(8, '비밀번호는 8자 이상이어야 합니다.'),
+  password: z
+    .string()
+    .min(8, '비밀번호는 8자 이상이어야 합니다.')
+    .regex(/[A-Z]/, '대문자를 포함해야 합니다.')
+    .regex(/[0-9]/, '숫자를 포함해야 합니다.')
+    .regex(/[^A-Za-z0-9]/, '특수문자를 포함해야 합니다.'),
 })
-type LoginForm = z.infer<typeof loginSchema>
+type SignupForm = z.infer<typeof signupSchema>
 
-export default function LoginPage() {
+export default function SignupPage() {
   const router = useRouter()
-  const { setAuth } = useAuthStore()
-  const [error, setError] = useState<string>('')
+  const [error, setError] = useState('')
 
   const {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<LoginForm>({ resolver: zodResolver(loginSchema) })
+  } = useForm<SignupForm>({ resolver: zodResolver(signupSchema) })
 
-  const onSubmit = async (data: LoginForm) => {
+  const onSubmit = async (data: SignupForm) => {
     setError('')
     try {
-      const res = await apiClient.post('/api/auth/login', data)
-      const { access_token, user } = res.data.data
-
-      setAuth(user, access_token)
-
-      // §12-2 전환 로직: AWS 미연동 → SCR-C-02, 연동 완료 → SCR-C-03
-      if (!user.aws_connected) {
-        router.push('/connect')
-      } else {
-        router.push('/dashboard')
-      }
+      await apiClient.post('/api/auth/signup', data)
+      router.push(`/login`)
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: { message?: string } } } })
           ?.response?.data?.error?.message ||
-        '로그인에 실패했습니다.'
+        '회원가입에 실패했습니다.'
       setError(msg)
     }
   }
@@ -59,11 +54,22 @@ export default function LoginPage() {
         <CardHeader className="text-center">
           <div className="text-3xl font-bold text-teal-600">⚡ AutoOps</div>
           <CardTitle className="text-sm text-gray-500 font-normal mt-1">
-            멀티클라우드 인프라 자동화 플랫폼
+            회원가입
           </CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <div>
+              <label className="text-sm font-medium">이름</label>
+              <Input
+                {...register('name')}
+                placeholder="홍길동"
+                className="mt-1"
+              />
+              {errors.name && (
+                <p className="text-red-500 text-xs mt-1">{errors.name.message}</p>
+              )}
+            </div>
             <div>
               <label className="text-sm font-medium">이메일</label>
               <Input
@@ -87,6 +93,9 @@ export default function LoginPage() {
               {errors.password && (
                 <p className="text-red-500 text-xs mt-1">{errors.password.message}</p>
               )}
+              <p className="text-xs text-gray-400 mt-1">
+                8자 이상, 대문자·숫자·특수문자 포함
+              </p>
             </div>
 
             {error && (
@@ -102,25 +111,24 @@ export default function LoginPage() {
             >
               {isSubmitting ? (
                 <span className="flex items-center gap-2">
-                  <span className="animate-spin">⏳</span> 로그인 중...
+                  <span className="animate-spin">⏳</span> 가입 중...
                 </span>
               ) : (
-                '로그인'
+                '회원가입'
               )}
             </Button>
+
+            <p className="text-center text-sm text-gray-500">
+              이미 계정이 있으신가요?{' '}
+              <button
+                type="button"
+                className="text-teal-600 hover:underline"
+                onClick={() => router.push('/login')}
+              >
+                로그인
+              </button>
+            </p>
           </form>
-
-          <p className="text-center text-sm text-gray-500 mt-4">
-            계정이 없으신가요?{' '}
-            <button
-              type="button"
-              className="text-teal-600 hover:underline"
-              onClick={() => router.push('/signup')}
-            >
-              회원가입
-            </button>
-          </p>
-
         </CardContent>
       </Card>
     </div>

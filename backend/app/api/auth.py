@@ -165,7 +165,12 @@ def signup(request: SignupRequest):
                 {"Name": "name", "Value": request.name},
             ]
         )
-        return {"success": True, "data": {"message": "인증 코드가 이메일로 발송되었습니다."}}
+        # 이메일 인증 없이 자동 확인 처리
+        cognito.admin_confirm_sign_up(
+            UserPoolId=settings.cognito_user_pool_id,
+            Username=request.email,
+        )
+        return {"success": True, "data": {"message": "회원가입이 완료되었습니다."}}
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
         if error_code == "UsernameExistsException":

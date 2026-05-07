@@ -9,7 +9,7 @@ import { IntentAnalysis } from '@/components/craftops/IntentAnalysis'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 
-type WizardPhase = 'project-create' | 'step1' | '2-1' | '2-2' | '2-3' | '2-4' | '2-5' | '2-6' | 'validate'
+type WizardPhase = 'project-create' | 'step1' | '2-1' | '2-2' | '2-3' | '2-4' | '2-5' | '2-6' | 'summary' | 'validate'
 
 export default function NewProjectPageContent() {
   const router       = useRouter()
@@ -28,6 +28,17 @@ export default function NewProjectPageContent() {
   const [isSubmitting, setIsSubmitting]     = useState(false)
   const [namingPreview, setNamingPreview]   = useState<string[]>([])
   const [stepConfigs, setStepConfigs]       = useState<Record<string, Record<string, unknown>>>({})
+  const [cidrError, setCidrError]           = useState('')
+
+  const validateCIDR = (cidr: string): boolean => {
+    const cidrRegex = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/
+    if (!cidrRegex.test(cidr)) return false
+    const [ip, prefix] = cidr.split('/')
+    const parts = ip.split('.').map(Number)
+    if (parts.some((p) => p > 255)) return false
+    if (parseInt(prefix) > 32) return false
+    return true
+  }
 
   const handleCreateProject = async () => {
     setIsSubmitting(true)
@@ -68,9 +79,8 @@ export default function NewProjectPageContent() {
       const nextStep = data.next_step
       if (nextStep) {
         setPhase(nextStep as WizardPhase)
-      } else {
-        router.push(`/projects/${projectId}/validate`)
       }
+      // next_step 없으면 summary로 이동
     } finally {
       setIsSubmitting(false)
     }
@@ -139,7 +149,7 @@ export default function NewProjectPageContent() {
     )
   }
 
-  if (phase === '2-1') {
+if (phase === '2-1') {
     return (
       <div className="p-6">
         <WizardLayout
@@ -161,24 +171,24 @@ export default function NewProjectPageContent() {
               <label className="text-sm font-medium">리소스 네이밍 규칙</label>
               <div className="grid grid-cols-2 gap-2 mt-1">
                 <div>
-                  <p className="text-xs text-gray-500">프리픽스</p>
-                  <Input value={projectForm.prefix} readOnly className="bg-gray-50" />
+                  <p className="text-xs text-[#9ca3af]">프리픽스</p>
+                  <Input value={projectForm.prefix} readOnly className="border-white/10 text-white" style={{ backgroundColor: '#121214' }} />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500">환경</p>
-                  <Input value={projectForm.environment} readOnly className="bg-gray-50" />
+                  <p className="text-xs text-[#9ca3af]">환경</p>
+                  <Input value={projectForm.environment} readOnly className="border-white/10 text-white" style={{ backgroundColor: '#121214' }} />
                 </div>
               </div>
             </div>
             {namingPreview.length > 0 && (
-              <div className="bg-gray-50 rounded p-3">
-                <p className="text-xs text-gray-500 mb-1">네이밍 미리보기</p>
+              <div className="bg-black/30 border border-white/8 rounded p-3">
+                <p className="text-xs text-[#9ca3af] mb-1">네이밍 미리보기</p>
                 <div className="text-xs space-y-0.5">
                   {namingPreview.slice(0, 5).map((n) => (
                     <p key={n} className="font-mono">{n}</p>
                   ))}
                   {namingPreview.length > 5 && (
-                    <p className="text-gray-400">... 외 {namingPreview.length - 5}개</p>
+                    <p className="text-[#9ca3af]">... 외 {namingPreview.length - 5}개</p>
                   )}
                 </div>
               </div>
@@ -197,11 +207,15 @@ export default function NewProjectPageContent() {
           completedSteps={completedSteps}
           sidekick="VPC CIDR 입력 시 서브넷 4개(prod) 또는 2개(dev/staging)가 자동 분배됩니다."
           onPrev={() => setPhase('2-1')}
-          onNext={() =>
-            handleSaveStep('2-2', {
-              vpc_cidr: (stepConfigs['2-2']?.vpc_cidr as string) || '10.0.0.0/16',
-            })
-          }
+          onNext={() => {
+            const cidr = (stepConfigs['2-2']?.vpc_cidr as string) || '10.0.0.0/16'
+            if (!validateCIDR(cidr)) {
+              setCidrError('올바른 CIDR 형식이 아닙니다. 예) 10.0.0.0/16')
+              return
+            }
+            setCidrError('')
+            handleSaveStep('2-2', { vpc_cidr: cidr })
+          }}
           isSubmitting={isSubmitting}
         >
           <div className="space-y-3">
@@ -209,16 +223,25 @@ export default function NewProjectPageContent() {
               <label className="text-sm font-medium">VPC CIDR</label>
               <Input
                 defaultValue="10.0.0.0/16"
-                onChange={(e) =>
+                className={`mt-1 ${cidrError ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
+                onChange={(e) => {
+                  const val = e.target.value
                   setStepConfigs((prev) => ({
                     ...prev,
-                    '2-2': { ...prev['2-2'], vpc_cidr: e.target.value },
+                    '2-2': { ...prev['2-2'], vpc_cidr: val },
                   }))
-                }
+                  if (cidrError) {
+                    setCidrError(validateCIDR(val) ? '' : '올바른 CIDR 형식이 아닙니다. 예) 10.0.0.0/16')
+                  }
+                }}
               />
-              <p className="text-xs text-gray-500 mt-1">
-                서브넷 자동 분배 (prod: Public 2 + Private 2 / dev·staging: Public 1 + Private 1)
-              </p>
+              {cidrError ? (
+                <p className="text-red-500 text-xs mt-1">⚠️ {cidrError}</p>
+              ) : (
+                <p className="text-xs text-[#9ca3af] mt-1">
+                  서브넷 자동 분배 (prod: Public 2 + Private 2 / dev·staging: Public 1 + Private 1)
+                </p>
+              )}
             </div>
           </div>
         </WizardLayout>
@@ -237,7 +260,7 @@ export default function NewProjectPageContent() {
           onNext={() => handleSaveStep('2-3', {})}
           isSubmitting={isSubmitting}
         >
-          <div className="space-y-2 text-sm bg-gray-50 rounded p-3">
+          <div className="space-y-2 text-sm bg-[#121214] rounded p-3">
             <p className="font-medium">자동 구성 내용</p>
             <p>SG-ALB: 443, 80 ← 0.0.0.0/0</p>
             <p>SG-App: 8080 ← SG-ALB</p>
@@ -269,10 +292,11 @@ export default function NewProjectPageContent() {
               <Input
                 value={`${projectForm.prefix}-${projectForm.environment}-alb`}
                 readOnly
-                className="bg-gray-50"
+                className="border-white/10 text-white"
+                style={{ backgroundColor: '#121214' }}
               />
             </div>
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-[#9ca3af]">
               서브넷: Public 자동 배치 / 보안그룹: SG-ALB 자동 연결 / HTTPS:443 리스너
             </p>
           </div>
@@ -306,11 +330,11 @@ export default function NewProjectPageContent() {
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-sm font-medium">vCPU</label>
-                <Input defaultValue="1" readOnly className="bg-gray-50" />
+                <Input defaultValue="1" readOnly className="border-white/10 text-white" style={{ backgroundColor: '#121214' }} />
               </div>
               <div>
                 <label className="text-sm font-medium">메모리 (MB)</label>
-                <Input defaultValue="2048" readOnly className="bg-gray-50" />
+                <Input defaultValue="2048" readOnly className="border-white/10 text-white" style={{ backgroundColor: '#121214' }} />
               </div>
             </div>
             <div>
@@ -344,10 +368,13 @@ export default function NewProjectPageContent() {
               : 'dev 환경: Multi-AZ OFF / 백업 0일 / 암호화 OFF'
           }
           onPrev={() => setPhase('2-5')}
-          onNext={() => handleSaveStep('2-6', {})}
+          onNext={async () => {
+            await handleSaveStep('2-6', {})
+            setPhase('summary')
+          }}
           isSubmitting={isSubmitting}
         >
-          <div className="space-y-2 text-sm bg-gray-50 rounded p-3">
+          <div className="space-y-2 text-sm bg-[#121214] rounded p-3">
             <p className="font-medium">자동 적용 설정 ({projectForm.environment})</p>
             <p>엔진: PostgreSQL 15</p>
             <p>인스턴스: {isProd ? 'db.t3.medium' : 'db.t3.micro'}</p>
@@ -356,6 +383,117 @@ export default function NewProjectPageContent() {
             <p>암호화: {isProd ? 'ON' : 'OFF'}</p>
           </div>
         </WizardLayout>
+      </div>
+    )
+  }
+
+  if (phase === 'summary') {
+    const isProd        = projectForm.environment === 'prod'
+    const vpcCidr       = (stepConfigs['2-2']?.vpc_cidr as string) || '10.0.0.0/16'
+    const albName       = `${projectForm.prefix}-${projectForm.environment}-alb`
+    const containerImage = (stepConfigs['2-5']?.container_image as string) || '-'
+
+    return (
+      <div className="px-6 py-8 md:px-12 md:py-12 max-w-2xl space-y-4">
+        <div className="flex justify-between items-center">
+          <h1 className="text-2xl font-bold">📋 리소스 요약</h1>
+          <span className="text-sm text-[#9ca3af]">배포 전 최종 확인</span>
+        </div>
+
+        <div className="space-y-3">
+          {/* 기본 설정 */}
+          <div className="bg-[#121214] border border-white/8 rounded-2xl p-4 space-y-2">
+            <p className="font-medium text-sm text-[#9ca3af]">기본 설정</p>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <p className="text-[#9ca3af]">프로젝트명</p>
+              <p className="font-mono">{projectForm.name}</p>
+              <p className="text-[#9ca3af]">네이밍 규칙</p>
+              <p className="font-mono">{projectForm.prefix}-{projectForm.environment}-*</p>
+              <p className="text-[#9ca3af]">리전</p>
+              <p className="font-mono">{projectForm.region}</p>
+              <p className="text-[#9ca3af]">환경</p>
+              <p className="font-mono">{projectForm.environment}</p>
+            </div>
+          </div>
+
+          {/* 네트워크 */}
+          <div className="bg-[#121214] border border-white/8 rounded-2xl p-4 space-y-2">
+            <p className="font-medium text-sm text-[#9ca3af]">네트워크</p>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <p className="text-[#9ca3af]">VPC CIDR</p>
+              <p className="font-mono">{vpcCidr}</p>
+              <p className="text-[#9ca3af]">서브넷 구성</p>
+              <p className="font-mono">{isProd ? 'Public 2 + Private 2' : 'Public 1 + Private 1'}</p>
+              <p className="text-[#9ca3af]">NAT Gateway</p>
+              <p className="font-mono">{isProd ? '생성' : '미생성'}</p>
+            </div>
+          </div>
+
+          {/* 보안 그룹 */}
+          <div className="bg-[#121214] border border-white/8 rounded-2xl p-4 space-y-2">
+            <p className="font-medium text-sm text-[#9ca3af]">보안 그룹</p>
+            <div className="text-sm space-y-1">
+              <p className="font-mono">SG-ALB: 443, 80 ← 0.0.0.0/0</p>
+              <p className="font-mono">SG-App: 8080 ← SG-ALB</p>
+              <p className="font-mono">SG-DB: 5432 ← SG-App</p>
+            </div>
+          </div>
+
+          {/* ALB */}
+          <div className="bg-[#121214] border border-white/8 rounded-2xl p-4 space-y-2">
+            <p className="font-medium text-sm text-[#9ca3af]">ALB</p>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <p className="text-[#9ca3af]">이름</p>
+              <p className="font-mono">{albName}</p>
+              <p className="text-[#9ca3af]">리스너</p>
+              <p className="font-mono">HTTPS:443</p>
+            </div>
+          </div>
+
+          {/* ECS */}
+          <div className="bg-[#121214] border border-white/8 rounded-2xl p-4 space-y-2">
+            <p className="font-medium text-sm text-[#9ca3af]">ECS Fargate</p>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <p className="text-[#9ca3af]">vCPU</p>
+              <p className="font-mono">1</p>
+              <p className="text-[#9ca3af]">메모리</p>
+              <p className="font-mono">2048 MB</p>
+              <p className="text-[#9ca3af]">컨테이너 이미지</p>
+              <p className="font-mono text-xs break-all">{containerImage}</p>
+              <p className="text-[#9ca3af]">최소 태스크</p>
+              <p className="font-mono">{isProd ? '2' : '1'}</p>
+              <p className="text-[#9ca3af]">오토스케일링</p>
+              <p className="font-mono">{isProd ? 'ON (CPU 70%)' : 'OFF'}</p>
+            </div>
+          </div>
+
+          {/* RDS */}
+          <div className="bg-[#121214] border border-white/8 rounded-2xl p-4 space-y-2">
+            <p className="font-medium text-sm text-[#9ca3af]">RDS PostgreSQL</p>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <p className="text-[#9ca3af]">인스턴스</p>
+              <p className="font-mono">{isProd ? 'db.t3.medium' : 'db.t3.micro'}</p>
+              <p className="text-[#9ca3af]">Multi-AZ</p>
+              <p className="font-mono">{isProd ? 'ON' : 'OFF'}</p>
+              <p className="text-[#9ca3af]">백업 보존</p>
+              <p className="font-mono">{isProd ? '30일' : '0일'}</p>
+              <p className="text-[#9ca3af]">암호화</p>
+              <p className="font-mono">{isProd ? 'ON' : 'OFF'}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-between pt-2">
+          <Button variant="outline" onClick={() => setPhase('2-6')}>
+            ← 설정 수정
+          </Button>
+          <Button
+            className="bg-teal-600 hover:bg-teal-700"
+            onClick={() => projectId && router.push(`/projects/${projectId}/validate`)}
+          >
+            검증 시작하기 →
+          </Button>
+        </div>
       </div>
     )
   }
