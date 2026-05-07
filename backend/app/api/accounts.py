@@ -44,50 +44,45 @@ def connect_account(
     """
     sts = boto3.client("sts", region_name="us-west-2")
 
-    if settings.skip_assume_role:
-        # 로컬 개발용 bypass
-        # ARN 형식: arn:aws:iam::{account_id}:role/AutoOpsRole
-        aws_account_id = request.role_arn.split(":")[4]
-    else:
-        # 실제 AssumeRole (ECS Fargate 배포 시)
-        try:
-            assumed = sts.assume_role(
-                RoleArn=request.role_arn,
-                RoleSessionName="autoops-verification",
-                ExternalId=current_user.user_id,
-                DurationSeconds=900,
-            )
-        except ClientError as e:
-            error_code = e.response["Error"]["Code"]
-            if error_code in ("AccessDenied", "InvalidClientTokenId"):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": "AWS_ROLE_ERROR",
-                        "message": "IAM Role Assume에 실패했습니다. Role ARN과 ExternalId를 확인하세요.",
-                    },
-                )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "AWS_ROLE_ERROR", "message": str(e)},
-            )
-
-        temp_creds = assumed["Credentials"]
-        temp_sts = boto3.client(
-            "sts",
-            aws_access_key_id=temp_creds["AccessKeyId"],
-            aws_secret_access_key=temp_creds["SecretAccessKey"],
-            aws_session_token=temp_creds["SessionToken"],
-            region_name="us-west-2",
+    # 항상 실제 AssumeRole 실행
+    try:
+        assumed = sts.assume_role(
+            RoleArn=request.role_arn,
+            RoleSessionName="autoops-verification",
+            ExternalId=current_user.user_id,
+            DurationSeconds=900,
         )
-        try:
-            identity = temp_sts.get_caller_identity()
-            aws_account_id = identity["Account"]
-        except ClientError:
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code in ("AccessDenied", "InvalidClientTokenId"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "AWS_ROLE_ERROR", "message": "연동된 계정 정보를 확인할 수 없습니다."},
+                detail={
+                    "code": "AWS_ROLE_ERROR",
+                    "message": "IAM Role Assume에 실패했습니다. Role ARN과 ExternalId를 확인하세요.",
+                },
             )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "AWS_ROLE_ERROR", "message": str(e)},
+        )
+
+    temp_creds = assumed["Credentials"]
+    temp_sts   = boto3.client(
+        "sts",
+        aws_access_key_id=temp_creds["AccessKeyId"],
+        aws_secret_access_key=temp_creds["SecretAccessKey"],
+        aws_session_token=temp_creds["SessionToken"],
+        region_name="us-west-2",
+    )
+    try:
+        identity       = temp_sts.get_caller_identity()
+        aws_account_id = identity["Account"]
+    except ClientError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "AWS_ROLE_ERROR", "message": "연동된 계정 정보를 확인할 수 없습니다."},
+        )
 
     # 이미 연동된 계정 여부 확인
     existing = db.query(AWSAccount).filter(
