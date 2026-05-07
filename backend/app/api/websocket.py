@@ -46,45 +46,44 @@ async def websocket_events(
 
     try:
         while True:
-            # ── CloudWatch 로그 폴링 (로컬 테스트 모드 스킵) ──────────
-            if not settings.skip_ecs_task:
-                try:
-                    streams = cw.describe_log_streams(
-                        logGroupName=log_group,
-                        orderBy="LastEventTime",
-                        descending=True,
-                        limit=1,
-                    )
-                    log_streams = streams.get("logStreams", [])
+            # 항상 CloudWatch 폴링
+            try:
+                streams = cw.describe_log_streams(
+                    logGroupName=log_group,
+                    orderBy="LastEventTime",
+                    descending=True,
+                    limit=1,
+                )
+                log_streams = streams.get("logStreams", [])
 
-                    if log_streams:
-                        kwargs: dict = {
-                            "logGroupName":  log_group,
-                            "logStreamName": log_streams[0]["logStreamName"],
-                            "startFromHead": True,
-                            "limit": 100,
-                        }
-                        if next_token:
-                            kwargs["nextToken"] = next_token
+                if log_streams:
+                    kwargs: dict = {
+                        "logGroupName":  log_group,
+                        "logStreamName": log_streams[0]["logStreamName"],
+                        "startFromHead": True,
+                        "limit": 100,
+                    }
+                    if next_token:
+                        kwargs["nextToken"] = next_token
 
-                        resp       = cw.get_log_events(**kwargs)
-                        events     = resp.get("events", [])
-                        next_token = resp.get("nextForwardToken")
+                    resp       = cw.get_log_events(**kwargs)
+                    events     = resp.get("events", [])
+                    next_token = resp.get("nextForwardToken")
 
-                        for event in events:
-                            await websocket.send_json({
-                                "event_type": "deploy_progress",
-                                "project_id": project_id,
-                                "timestamp":  datetime.now(timezone.utc).isoformat(),
-                                "data": {
-                                    "deployment_id": deployment_id,
-                                    "log":       event["message"],
-                                    "timestamp": event["timestamp"],
-                                },
-                            })
+                    for event in events:
+                        await websocket.send_json({
+                            "event_type": "deploy_progress",
+                            "project_id": project_id,
+                            "timestamp":  datetime.now(timezone.utc).isoformat(),
+                            "data": {
+                                "deployment_id": deployment_id,
+                                "log":           event["message"],
+                                "timestamp":     event["timestamp"],
+                            },
+                        })
 
-                except cw.exceptions.ResourceNotFoundException:
-                    pass
+            except cw.exceptions.ResourceNotFoundException:
+                pass
 
             # ── 배포 완료/실패 여부 DB 체크 (매 polling 시) ──────────
             db: Session = SessionLocal()

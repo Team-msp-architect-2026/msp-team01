@@ -14,10 +14,9 @@ from app.services.craftops.gemini_client import GeminiClient
 from app.services.craftops.dag_engine import DAGEngine, create_initial_deployment
 from app.services.craftops.hcl_generator import HCLGenerator
 from app.services.craftops.validator import ValidationLoop
-from app.services.craftops.runner import TerraformRunnerService, upload_hcl_to_s3
+from app.services.craftops.runner import TerraformRunnerService, upload_hcl_to_s3, EventBridgePublisher
 from app.models.aws_account import AWSAccount
 from datetime import datetime
-from app.services.craftops.runner import TerraformRunnerService, upload_hcl_to_s3, EventBridgePublisher
 
 router = APIRouter()
 
@@ -74,8 +73,8 @@ def analyze_intent(
     return {
         "success": True,
         "data": {
-            "analysis_id": analysis_id,
-            "resources": analysis.get("resources", []),
+            "analysis_id":        analysis_id,
+            "resources":          analysis.get("resources", []),
             "recommended_config": analysis.get("recommended_config", {}),
         },
     }
@@ -277,8 +276,8 @@ def validate(
     if result.validate_manual_edit_required:
         vr_data = {
             "validate": {
-                "passed": False,
-                "correction_attempts": result.validate_correction_attempts,
+                "passed":               False,
+                "correction_attempts":  result.validate_correction_attempts,
                 "manual_edit_required": True,
             }
         }
@@ -292,7 +291,7 @@ def validate(
                 "code": "TERRAFORM_ERROR",
                 "message": "자동 수정에 실패했습니다.",
                 "details": {
-                    "error_location": result.validate_error[:500],
+                    "error_location":      result.validate_error[:500],
                     "manual_edit_required": True,
                 },
             },
@@ -449,42 +448,34 @@ def deploy(
             detail={"code": "NOT_FOUND", "message": "연동된 AWS 계정을 찾을 수 없습니다."},
         )
 
-    # HCL S3 업로드 (로컬 모드 스킵)
-    if settings.skip_ecs_task:
-        hcl_s3_path = f"s3://autoops-terraform-state/projects/{request.project_id}/source/main.tf"
-    else:
-        try:
-            hcl_s3_path = upload_hcl_to_s3(
-                project_id=request.project_id,
-                deployment_id=deployment.deployment_id,
-                hcl_code=deployment.terraform_code,
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"code": "INTERNAL_ERROR", "message": f"HCL S3 업로드 실패: {str(e)}"},
-            )
+    try:
+        hcl_s3_path = upload_hcl_to_s3(
+            project_id=request.project_id,
+            deployment_id=deployment.deployment_id,
+            hcl_code=deployment.terraform_code,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": "INTERNAL_ERROR", "message": f"HCL S3 업로드 실패: {str(e)}"},
+        )
 
     deployment.status = "deploying"
     db.commit()
 
-    # Ephemeral ECS Task 생성 (로컬 모드 스킵)
     runner = TerraformRunnerService()
     try:
-        if settings.skip_ecs_task:
-            task_arn = f"local-test-task-{deployment.deployment_id}"
-        else:
-            task_arn = runner.spawn_apply_task(
-                project_id=request.project_id,
-                deployment_id=deployment.deployment_id,
-                hcl_s3_path=hcl_s3_path,
-                role_arn=account.role_arn,
-                region=project.region,
-                subnet_ids=settings.platform_subnet_ids.split(","),
-                security_group_ids=settings.platform_sg_ids.split(","),
-            )
+        task_arn = runner.spawn_apply_task(
+            project_id=request.project_id,
+            deployment_id=deployment.deployment_id,
+            hcl_s3_path=hcl_s3_path,
+            role_arn=account.role_arn,
+            region=project.region,
+            subnet_ids=settings.platform_subnet_ids.split(","),
+            security_group_ids=settings.platform_sg_ids.split(","),
+        )
     except Exception as e:
-        deployment.status = "failed"
+        deployment.status        = "failed"
         deployment.error_message = str(e)
         db.commit()
         raise HTTPException(
@@ -499,7 +490,7 @@ def deploy(
         "success": True,
         "data": {
             "deployment_id": deployment.deployment_id,
-            "status": "deploying",
+            "status":        "deploying",
             "websocket_url": f"wss://api.autoops.io/ws/events/{request.project_id}",
         },
     }
@@ -562,23 +553,22 @@ def deployment_complete_callback(
             "security_group_ids": {"alb": "", "app": "", "db": ""},
         }
 
-        if not settings.skip_ecs_task:
-            publisher = EventBridgePublisher()
-            try:
-                publisher.publish_deployment_completed(
-                    project_id=body.project_id,
-                    deployment_id=deployment_id,
-                    user_id=project.user_id,
-                    account_id=project.account_id,
-                    aws_account_id=account.aws_account_id if account else "",
-                    role_arn=account.role_arn if account else "",
-                    region=project.region,
-                    prefix=project.prefix,
-                    environment=project.environment,
-                    resources=resources,
-                )
-            except Exception:
-                pass
+        publisher = EventBridgePublisher()
+        try:
+            publisher.publish_deployment_completed(
+                project_id=body.project_id,
+                deployment_id=deployment_id,
+                user_id=project.user_id,
+                account_id=project.account_id,
+                aws_account_id=account.aws_account_id if account else "",
+                role_arn=account.role_arn if account else "",
+                region=project.region,
+                prefix=project.prefix,
+                environment=project.environment,
+                resources=resources,
+            )
+        except Exception as e:
+            print(f"[경고] EventBridge 발행 실패: {e}")
     else:
         db.commit()
 
@@ -638,21 +628,26 @@ def deployment_action(
     runner = TerraformRunnerService()
 
     if body.action == "resume":
-        deployment.status      = "deploying"
+        deployment.status        = "deploying"
         deployment.error_message = None
         db.commit()
 
-        if not settings.skip_ecs_task:
-            hcl_s3_path = f"s3://autoops-terraform-state/projects/{project_id}/source/main.tf"
-            runner.spawn_apply_task(
-                project_id=project_id,
-                deployment_id=deployment_id,
-                hcl_s3_path=hcl_s3_path,
-                role_arn=account.role_arn,
-                region=project.region,
-                subnet_ids=settings.platform_subnet_ids.split(","),
-                security_group_ids=settings.platform_sg_ids.split(","),
-            )
+        # [FIX] hcl_s3_path 정의 추가
+        hcl_s3_path = upload_hcl_to_s3(
+            project_id=project_id,
+            deployment_id=deployment_id,
+            hcl_code=deployment.terraform_code,
+        )
+
+        runner.spawn_apply_task(
+            project_id=project_id,
+            deployment_id=deployment_id,
+            hcl_s3_path=hcl_s3_path,
+            role_arn=account.role_arn,
+            region=project.region,
+            subnet_ids=settings.platform_subnet_ids.split(","),
+            security_group_ids=settings.platform_sg_ids.split(","),
+        )
 
     elif body.action == "fix_retry":
         if body.fix_params:
@@ -666,31 +661,36 @@ def deployment_action(
         deployment.error_message = None
         db.commit()
 
-        if not settings.skip_ecs_task:
-            hcl_s3_path = f"s3://autoops-terraform-state/projects/{project_id}/source/main.tf"
-            runner.spawn_apply_task(
-                project_id=project_id,
-                deployment_id=deployment_id,
-                hcl_s3_path=hcl_s3_path,
-                role_arn=account.role_arn,
-                region=project.region,
-                subnet_ids=settings.platform_subnet_ids.split(","),
-                security_group_ids=settings.platform_sg_ids.split(","),
-            )
+        # [FIX] hcl_s3_path 정의 추가
+        hcl_s3_path = upload_hcl_to_s3(
+            project_id=project_id,
+            deployment_id=deployment_id,
+            hcl_code=deployment.terraform_code,
+        )
+
+        runner.spawn_apply_task(
+            project_id=project_id,
+            deployment_id=deployment_id,
+            hcl_s3_path=hcl_s3_path,
+            role_arn=account.role_arn,
+            region=project.region,
+            subnet_ids=settings.platform_subnet_ids.split(","),
+            security_group_ids=settings.platform_sg_ids.split(","),
+        )
 
     elif body.action == "full_destroy":
         deployment.status = "deploying"
         db.commit()
 
-        if not settings.skip_ecs_task:
-            runner.spawn_destroy_task(
-                project_id=project_id,
-                deployment_id=deployment_id,
-                role_arn=account.role_arn,
-                region=project.region,
-                subnet_ids=settings.platform_subnet_ids.split(","),
-                security_group_ids=settings.platform_sg_ids.split(","),
-            )
+        runner.spawn_destroy_task(
+            project_id=project_id,
+            deployment_id=deployment_id,
+            role_arn=account.role_arn,
+            region=project.region,
+            subnet_ids=settings.platform_subnet_ids.split(","),
+            security_group_ids=settings.platform_sg_ids.split(","),
+        )
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
