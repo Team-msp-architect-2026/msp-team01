@@ -47,7 +47,7 @@ export default function ConnectPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+    <div className="min-h-screen flex items-center justify-center">
       <Card className="w-full max-w-lg">
         <CardHeader>
           <CardTitle>AWS 계정 연동</CardTitle>
