@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import auth, accounts, projects, craft, mirror, websocket
 from app.services.mirrorops.sqs_worker import start_sqs_worker
-
+from app.core.config import settings
 
 @asynccontextmanager
 async def lifespan(app):
@@ -26,7 +26,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.allowed_origins.split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
