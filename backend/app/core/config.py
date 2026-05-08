@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     bedrock_region: str = "us-west-2"
 
+    allowed_origins: str = "http://localhost:3000"
+
     # Database
     db_host: str = "localhost"
     db_port: int = 5432
