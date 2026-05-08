@@ -154,7 +154,7 @@ class GeminiClient:
             [system_prompt, user_message],
             generation_config=genai.GenerationConfig(
                 temperature=0.1,
-                max_output_tokens=8192,
+                max_output_tokens=32768,
             ),
         )
 
@@ -188,7 +188,7 @@ class GeminiClient:
             [system_prompt, user_message],
             generation_config=genai.GenerationConfig(
                 temperature=0.05,     # 수정 시 더욱 보수적인 temperature
-                max_output_tokens=8192,
+                max_output_tokens=32768,
             ),
         )
 
@@ -227,7 +227,7 @@ class GeminiClient:
             [system_prompt, user_message],
             generation_config=genai.GenerationConfig(
                 temperature=0.05,
-                max_output_tokens=8192,
+                max_output_tokens=32768,
             ),
         )
 
