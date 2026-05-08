@@ -58,7 +58,12 @@ class ValidationLoop:
         # ① terraform validate + Self-Correction Loop
         current_hcl = hcl_code
         self._write_hcl(work_dir, current_hcl)
-        self._run_cmd(["terraform", "init", "-backend=false"], work_dir)
+        init_result = self._run_cmd(["terraform", "init", "-backend=false", "-no-color"], work_dir)
+        if init_result["returncode"] != 0:
+            result.validate_passed = False
+            result.validate_error = init_result["stderr"] or init_result["stdout"]
+            result.validate_manual_edit_required = True
+            return result
 
         for attempt in range(1, self.MAX_CORRECTION_ATTEMPTS + 1):
             vr = self._run_cmd(["terraform", "validate", "-json"], work_dir)

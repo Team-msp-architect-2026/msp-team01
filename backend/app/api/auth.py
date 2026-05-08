@@ -7,6 +7,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.auth import get_current_user
 from app.models.user import User
 
 router = APIRouter()
@@ -210,3 +211,17 @@ def confirm(request: ConfirmRequest):
             status_code=500,
             detail={"code": "INTERNAL_ERROR", "message": str(e)}
         )
+
+@router.get("/me")
+def get_me(
+    current_user: User = Depends(get_current_user),
+):
+    """현재 로그인한 유저 정보 반환"""
+    return {
+        "success": True,
+        "data": {
+            "user_id":  current_user.user_id,
+            "email":    current_user.email,
+            "name":     current_user.name,
+        },
+    }
