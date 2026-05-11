@@ -56,12 +56,6 @@ class ValidationLoop:
     def run(self, hcl_code: str, work_dir: str) -> ValidationResult:
         result = ValidationResult(final_hcl_code=hcl_code)
 
-<<<<<<< Updated upstream
-        # ① terraform validate + Self-Correction Loop
-        current_hcl = hcl_code
-        self._write_hcl(work_dir, current_hcl)
-        self._run_cmd(["terraform", "init", "-backend=false"], work_dir)
-=======
         # ① terraform validate
         self._write_hcl(work_dir, hcl_code)
 
@@ -73,7 +67,6 @@ class ValidationLoop:
             result.validate_error = init_result["stderr"] or init_result["stdout"]
             result.validate_manual_edit_required = True
             return result
->>>>>>> Stashed changes
 
         vr = self._run_cmd(["terraform", "validate", "-json"], work_dir)
         if vr["returncode"] == 0:
