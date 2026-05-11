@@ -49,13 +49,33 @@ export default function ValidatePage() {
     }
   }
 
+  const handleViewFullCode = () => {
+    if (!result) return
+    const win = window.open('', '_blank')
+    if (win) {
+      win.document.write(`<pre style="background:#0d0d0f;color:#9ca3af;padding:16px;font-size:12px;">${result.terraform_code}</pre>`)
+      win.document.close()
+    }
+  }
+
+  const handleDownload = () => {
+    if (!result) return
+    const blob = new Blob([result.terraform_code], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'main.tf'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const vr = result?.validation_results
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">🔍 Step 3 — 코드 검증</h1>
-        <span className="text-sm text-gray-500">Step 3/4</span>
+        <span className="text-sm text-[#9ca3af]">Step 3/4</span>
       </div>
 
       {!result && !error && (
@@ -113,12 +133,19 @@ export default function ValidatePage() {
               <CardTitle className="text-sm">Terraform 코드 미리보기</CardTitle>
             </CardHeader>
             <CardContent>
-              <pre className="text-xs bg-gray-50 p-3 rounded overflow-auto max-h-32">
+              <pre
+                className="text-xs p-3 rounded overflow-auto max-h-32 border border-white/8 text-[#9ca3af]"
+                style={{ backgroundColor: '#0d0d0f' }}
+              >
                 {result.terraform_code.slice(0, 300)}...
               </pre>
               <div className="flex gap-2 mt-2">
-                <Button size="sm" variant="outline">전체 코드 보기</Button>
-                <Button size="sm" variant="outline">다운로드</Button>
+                <Button size="sm" variant="outline" onClick={handleViewFullCode}>
+                  전체 코드 보기
+                </Button>
+                <Button size="sm" variant="outline" onClick={handleDownload}>
+                  다운로드
+                </Button>
               </div>
             </CardContent>
           </Card>
@@ -132,7 +159,7 @@ export default function ValidatePage() {
                 <span>{vr.validate.passed ? '✅' : '❌'}</span>
                 <span>terraform validate</span>
                 {vr.validate.correction_attempts > 0 && (
-                  <span className="text-xs text-gray-500">
+                  <span className="text-xs text-[#9ca3af]">
                     (Self-Correction {vr.validate.correction_attempts}회)
                   </span>
                 )}
@@ -156,7 +183,7 @@ export default function ValidatePage() {
             <CardContent className="space-y-1">
               {vr.cost_estimation.breakdown.map((item) => (
                 <div key={item.resource} className="flex justify-between text-sm">
-                  <span className="text-gray-600">{item.resource}</span>
+                  <span className="text-[#9ca3af]">{item.resource}</span>
                   <span>${item.monthly_cost.toFixed(2)} / 월</span>
                 </div>
               ))}
@@ -166,7 +193,7 @@ export default function ValidatePage() {
           <Card>
             <CardContent className="p-4 text-sm">
               📋 terraform plan:{' '}
-              <span className="text-green-600 font-medium">
+              <span className="text-emerald-400 font-medium">
                 {vr.plan.add} to add
               </span>
               , {vr.plan.change} to change, {vr.plan.destroy} to destroy

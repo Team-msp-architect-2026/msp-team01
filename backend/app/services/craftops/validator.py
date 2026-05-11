@@ -3,7 +3,6 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass, field
-from app.services.craftops.gemini_client import GeminiClient
 
 
 @dataclass
@@ -13,7 +12,7 @@ class ValidationResult:
     validate_passed: bool = False
     validate_correction_attempts: int = 0
     validate_error: str = ""
-    validate_manual_edit_required: bool = False  # 3회 실패 시 True
+    validate_manual_edit_required: bool = False
 
     # ② 보안 스캔 (tfsec + checkov)
     security_passed: bool = False
@@ -41,49 +40,52 @@ class ValidationLoop:
     """
     Terraform HCL에 대해 4단계 Validation을 순차 실행한다. (§4-4 Step 3)
 
-    ① terraform validate  — Self-Correction 최대 3회 (FR-A-011)
-    ② tfsec + checkov     — CRITICAL 시 Gemini 자동 수정 후 재스캔 (FR-A-012)
+    ① terraform validate  — Python 템플릿 기반이므로 항상 유효. 실패 시 즉시 중단.
+    ② tfsec + checkov     — CRITICAL 시 배포 차단 + fixed_hcl 반환 (FR-A-012)
     ③ Infracost           — 리소스별 월 예상 비용 (FR-A-013)
     ④ terraform plan      — 리소스 변경 미리보기 (FR-A-014)
+
+    v2 변경: Gemini Self-Correction Loop 제거.
+    hcl_template.py 기반 HCL은 항상 유효하므로 correction 불필요.
+    CRITICAL 보안 이슈 발생 시에도 Gemini 호출 없이 fixed_hcl 빈 값으로 반환.
     """
 
-    MAX_CORRECTION_ATTEMPTS = 3
-
     def __init__(self):
-        self.gemini = GeminiClient()
+        pass
 
     def run(self, hcl_code: str, work_dir: str) -> ValidationResult:
         result = ValidationResult(final_hcl_code=hcl_code)
 
+<<<<<<< Updated upstream
         # ① terraform validate + Self-Correction Loop
         current_hcl = hcl_code
         self._write_hcl(work_dir, current_hcl)
-        init_result = self._run_cmd(["terraform", "init", "-backend=false", "-no-color"], work_dir)
+        self._run_cmd(["terraform", "init", "-backend=false"], work_dir)
+=======
+        # ① terraform validate
+        self._write_hcl(work_dir, hcl_code)
+
+        init_result = self._run_cmd(
+            ["terraform", "init", "-backend=false", "-reconfigure", "-no-color"], work_dir
+        )
         if init_result["returncode"] != 0:
             result.validate_passed = False
             result.validate_error = init_result["stderr"] or init_result["stdout"]
             result.validate_manual_edit_required = True
             return result
+>>>>>>> Stashed changes
 
-        for attempt in range(1, self.MAX_CORRECTION_ATTEMPTS + 1):
-            vr = self._run_cmd(["terraform", "validate", "-json"], work_dir)
-
-            if vr["returncode"] == 0:
-                result.validate_passed = True
-                result.validate_correction_attempts = attempt - 1
-                result.final_hcl_code = current_hcl
-                break
-            else:
-                error_msg = vr["stdout"] or vr["stderr"]
-                if attempt < self.MAX_CORRECTION_ATTEMPTS:
-                    current_hcl = self.gemini.correct_hcl(current_hcl, error_msg, attempt)
-                    self._write_hcl(work_dir, current_hcl)
-                else:
-                    result.validate_passed = False
-                    result.validate_correction_attempts = self.MAX_CORRECTION_ATTEMPTS
-                    result.validate_error = error_msg
-                    result.validate_manual_edit_required = True
-                    return result
+        vr = self._run_cmd(["terraform", "validate", "-json"], work_dir)
+        if vr["returncode"] == 0:
+            result.validate_passed = True
+            result.validate_correction_attempts = 0
+            result.final_hcl_code = hcl_code
+        else:
+            result.validate_passed = False
+            result.validate_correction_attempts = 0
+            result.validate_error = vr["stdout"] or vr["stderr"]
+            result.validate_manual_edit_required = True
+            return result
 
         # ② tfsec + checkov 보안 스캔
         tfsec_result   = self._run_tfsec(work_dir)
@@ -100,14 +102,8 @@ class ValidationLoop:
                 result.security_medium_count += 1
 
         if result.security_critical_count > 0:
-            critical_issues = [
-                i for i in result.security_issues
-                if i.get("severity", "").upper() == "CRITICAL"
-            ]
-            fixed_hcl = self.gemini.fix_critical_security_issues(
-                result.final_hcl_code, critical_issues
-            )
-            result.security_fixed_hcl = fixed_hcl
+            # CRITICAL 발견: 배포 차단. fixed_hcl은 빈 값 반환 (Gemini 미사용)
+            result.security_fixed_hcl = ""
             result.security_passed = False
             return result
 
@@ -120,14 +116,14 @@ class ValidationLoop:
 
         # ④ terraform plan
         pr = self._run_cmd(
-            ["terraform", "plan", "-json", "-out=tfplan.binary"], work_dir
+            ["terraform", "plan", "-refresh=false", "-json", "-out=tfplan.binary"], work_dir
         )
         if pr["returncode"] == 0:
             result.plan_passed = True
             summary = self._parse_plan_summary(pr["stdout"])
             result.plan_add     = summary.get("add", 0)
             result.plan_change  = summary.get("change", 0)
-            result.plan_destroy = summary.get("destroy", 0)
+            result.plan_destroy = summary.get("remove", 0)
 
         return result
 

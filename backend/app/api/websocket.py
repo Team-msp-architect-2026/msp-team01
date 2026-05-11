@@ -41,7 +41,7 @@ async def websocket_events(
         await websocket.close()
         return
 
-    log_group  = f"/autoops/terraform-runner/{deployment_id}"
+    log_group  = "/autoops/terraform-runner"
     next_token = None
 
     try:
