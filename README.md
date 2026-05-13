@@ -106,7 +106,7 @@ AutoOps는 인프라 엔지니어가 **반복적인 코드 작성 대신 아키�
 ## 🚀 기술적 핵심 성과 (Architecture Highlights)
 
 ### 1. 비용 90% 절감 Warm Standby DR 전략
-GCP를 상시 가동하는 Hot Standby 방식 대신, 즉시 배포 가능한 **DR Package(Terraform HCL + 컨테이너 이미지 + DB 스냅샷)를 S3에 상시 최신화**하는 Warm Standby 전략을 채택했습니다. GCP 상시 운영 대비 약 90% 이상의 비용을 절감하면서도 **목표 RTO 12분 이내, RPO 3분 이내**의 복구 능력을 유지합니다.
+GCP를 상시 가동하는 Hot Standby 방식 대신, 즉시 배포 가능한 **DR Package(Terraform HCL + 컨테이너 이미지 + DB 스냅샷)를 S3에 상시 최신화**하는 Warm Standby 전략을 채택했습니다. GCP 상시 운영 대비 약 90% 이상의 비용을 절감하면서도 RTO 15분 내외(최신 DR 패키지 기반 인프라 재건 기준)의 복구 능력을 유지합니다.
 
 ### 2. AI + 룰 엔진 하이브리드 매핑 아키텍처
 AWS → GCP 리소스 변환에 단일 AI에 의존하지 않고 **룰 기반(6개 리소스, 신뢰도 auto) + AWS Bedrock Claude Sonnet(5개 리소스, 신뢰도 review)** 의 하이브리드 전략을 설계했습니다. 표준 리소스는 결정론적 룰로 빠르게 처리하고, SG→Firewall 변환처럼 복잡한 매핑만 AI로 보완해 신뢰도와 비용을 동시에 최적화했습니다.
