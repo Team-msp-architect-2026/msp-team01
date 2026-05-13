@@ -47,6 +47,8 @@ class Settings(BaseSettings):
 
     # 내부 콜백 API 보안 키
     internal_secret: str = ""
+    # 백엔드 ALB URL (terraform-runner 콜백용)
+    backend_api_url: str = ""
 
     @property
     def database_url(self) -> str:

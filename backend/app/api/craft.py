@@ -449,10 +449,11 @@ def deploy(
         )
 
     try:
+        deploy_hcl = HCLGenerator().generate_for_deploy(deployment.config_snapshot)
         hcl_s3_path = upload_hcl_to_s3(
             project_id=request.project_id,
             deployment_id=deployment.deployment_id,
-            hcl_code=deployment.terraform_code,
+            hcl_code=deploy_hcl,
         )
     except Exception as e:
         raise HTTPException(
@@ -471,6 +472,7 @@ def deploy(
             hcl_s3_path=hcl_s3_path,
             role_arn=account.role_arn,
             region=project.region,
+            user_id=current_user.user_id,
             subnet_ids=settings.platform_subnet_ids.split(","),
             security_group_ids=settings.platform_sg_ids.split(","),
         )
@@ -633,10 +635,11 @@ def deployment_action(
         db.commit()
 
         # [FIX] hcl_s3_path 정의 추가
+        deploy_hcl = HCLGenerator().generate_for_deploy(deployment.config_snapshot)
         hcl_s3_path = upload_hcl_to_s3(
             project_id=project_id,
             deployment_id=deployment_id,
-            hcl_code=deployment.terraform_code,
+            hcl_code=deploy_hcl,
         )
 
         runner.spawn_apply_task(
@@ -662,10 +665,11 @@ def deployment_action(
         db.commit()
 
         # [FIX] hcl_s3_path 정의 추가
+        deploy_hcl = HCLGenerator().generate_for_deploy(deployment.config_snapshot)
         hcl_s3_path = upload_hcl_to_s3(
             project_id=project_id,
             deployment_id=deployment_id,
-            hcl_code=deployment.terraform_code,
+            hcl_code=deploy_hcl,
         )
 
         runner.spawn_apply_task(

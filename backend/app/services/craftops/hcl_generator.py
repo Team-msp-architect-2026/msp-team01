@@ -3,30 +3,42 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from app.services.craftops.gemini_client import GeminiClient
+from app.services.craftops.hcl_template import generate_hcl as template_generate_hcl
 
 
 class HCLGenerator:
     """
     config_snapshot을 받아 Terraform HCL 코드를 생성하고
     terraform CLI 명령어 실행을 위한 임시 디렉토리를 관리한다.
+
+    v2: Gemini API 호출 제거 → Python 템플릿 기반 HCL 생성으로 전환
+    v3: validate용(include_backend=False) / deploy용(include_backend=True) 분리
+        - validate용: backend 블록 없음 → plan.add 정상 출력 (30개)
+        - deploy용:   backend 블록 포함 → S3 state 정상 저장
     """
 
     def __init__(self):
-        self.gemini = GeminiClient()
+        pass
 
     def generate(self, config_snapshot: dict) -> tuple[str, str]:
         """
-        Gemini로 HCL을 생성하고 임시 디렉토리 main.tf에 저장한다.
+        validate용 HCL 생성 (backend 블록 없음 → plan.add 정상 출력).
+        validator.py에서 호출.
         반환: (hcl_code, work_dir)
         """
-        hcl_code = self.gemini.generate_hcl(config_snapshot)
-
+        hcl_code   = template_generate_hcl(config_snapshot, include_backend=False)
         project_id = config_snapshot.get("project_id", "unknown")
         work_dir   = tempfile.mkdtemp(prefix=f"autoops-{project_id[:8]}-")
-
         self.write_to_dir(hcl_code, work_dir)
         return hcl_code, work_dir
+
+    def generate_for_deploy(self, config_snapshot: dict) -> str:
+        """
+        deploy용 HCL 생성 (backend 블록 포함 → S3 state 저장).
+        craft.py의 deploy 엔드포인트에서 호출.
+        반환: hcl_code (S3 업로드용)
+        """
+        return template_generate_hcl(config_snapshot, include_backend=True)
 
     def write_to_dir(self, hcl_code: str, work_dir: str) -> None:
         """HCL 코드를 작업 디렉토리의 main.tf에 저장(덮어쓰기)한다."""

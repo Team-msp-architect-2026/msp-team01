@@ -56,6 +56,7 @@ class TerraformRunnerService:
         hcl_s3_path: str,
         role_arn: str,
         region: str,
+        user_id: str,
         subnet_ids: list[str],
         security_group_ids: list[str],
     ) -> str:
@@ -88,6 +89,7 @@ class TerraformRunnerService:
                             # CloudWatch 로그 그룹 — §7-7 명명 규칙
                             {"name": "CW_LOG_GROUP",
                              "value": f"/autoops/terraform-runner/{deployment_id}"},
+                            {"name": "EXTERNAL_ID", "value": user_id},
                         ],
                     }
                 ]
@@ -109,6 +111,7 @@ class TerraformRunnerService:
         deployment_id: str,
         role_arn: str,
         region: str,
+        user_id: str,
         subnet_ids: list[str],
         security_group_ids: list[str],
     ) -> str:
@@ -142,6 +145,7 @@ class TerraformRunnerService:
                             {"name": "ACTION",        "value": "destroy"},
                             {"name": "CW_LOG_GROUP",
                              "value": f"/autoops/terraform-runner/{deployment_id}"},
+                            {"name": "EXTERNAL_ID", "value": user_id},
                         ],
                     }
                 ]
