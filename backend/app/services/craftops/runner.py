@@ -87,9 +87,10 @@ class TerraformRunnerService:
                             {"name": "REGION",         "value": region},
                             {"name": "ACTION",         "value": "apply"},
                             # CloudWatch 로그 그룹 — §7-7 명명 규칙
-                            {"name": "CW_LOG_GROUP",
-                             "value": f"/autoops/terraform-runner/{deployment_id}"},
+                            {"name": "CW_LOG_GROUP", "value": "/autoops/terraform-runner"},
                             {"name": "EXTERNAL_ID", "value": user_id},
+                            {"name": "BACKEND_API_URL", "value": settings.backend_api_url},
+                            {"name": "INTERNAL_SECRET", "value": settings.internal_secret},
                         ],
                     }
                 ]
@@ -143,9 +144,10 @@ class TerraformRunnerService:
                             {"name": "ROLE_ARN",      "value": role_arn},
                             {"name": "REGION",        "value": region},
                             {"name": "ACTION",        "value": "destroy"},
-                            {"name": "CW_LOG_GROUP",
-                             "value": f"/autoops/terraform-runner/{deployment_id}"},
+                            {"name": "CW_LOG_GROUP", "value": "/autoops/terraform-runner"},
                             {"name": "EXTERNAL_ID", "value": user_id},
+                            {"name": "BACKEND_API_URL", "value": settings.backend_api_url},
+                            {"name": "INTERNAL_SECRET", "value": settings.internal_secret},
                         ],
                     }
                 ]

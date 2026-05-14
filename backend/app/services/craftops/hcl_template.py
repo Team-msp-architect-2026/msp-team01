@@ -12,8 +12,12 @@ Python 템플릿 기반 Terraform HCL 생성.
   ③ RDS engine: 'postgresql' → 'postgres'
   ④ parameter_group_name: 'default.postgresql15' → 'default.postgres15'
 - v5: include_backend 파라미터 추가
-  validate용(include_backend=False): backend 블록 없음 → plan.add 정상 출력
-  deploy용(include_backend=True):   backend 블록 포함 → S3 state 저장
+- v6: 5개 버그 수정
+  ① listener redirect → forward (TG-ALB 연결 에러 수정)
+  ② ECS Service depends_on lb_listener 추가
+  ③ RDS deletion_protection = false (destroy 시 에러 수정)
+  ④ IAM Role logs:CreateLogGroup 인라인 정책 추가
+  ⑤ NAT Gateway depends_on igw 추가
 """
 
 
@@ -58,10 +62,8 @@ def generate_hcl(config_snapshot: dict, include_backend: bool = True) -> str:
 
     p         = f"{prefix}-{environment}"
     p_lower   = f"{prefix}-{environment}".lower()
-    cpu_units = vcpu * 1024
+    cpu_units = int(vcpu * 1024)
 
-    # [v5] include_backend에 따라 terraform 블록 전체를 분기
-    # f-string 내부에서 중괄호 처리 문제를 피하기 위해 블록 전체를 별도 변수로 관리
     if include_backend:
         terraform_block = (
             "terraform {\n"
@@ -198,6 +200,8 @@ resource "aws_eip" "{p}-nat-eip" {{
 resource "aws_nat_gateway" "{p}-nat" {{
   allocation_id = aws_eip.{p}-nat-eip.id
   subnet_id     = aws_subnet.{p}-subnet-public-a.id
+
+  depends_on = [aws_internet_gateway.{p}-igw]
 
   tags = {{
     Name        = "{p}-nat"
@@ -401,19 +405,15 @@ resource "aws_lb_target_group" "{p}-tg" {{
   }}
 }}
 
-# AVD-AWS-0054: HTTP → HTTPS redirect
+# [v6 수정①] redirect → forward (TG-ALB 연결 보장)
 resource "aws_lb_listener" "{p}-listener-http" {{
   load_balancer_arn = aws_lb.{p}-alb.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {{
-    type = "redirect"
-    redirect {{
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }}
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.{p}-tg.arn
   }}
 
   tags = {{
@@ -447,6 +447,21 @@ resource "aws_iam_role" "{p}-iam-role" {{
 resource "aws_iam_role_policy_attachment" "{p}-iam-policy" {{
   role       = aws_iam_role.{p}-iam-role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}}
+
+# [v6 수정④] logs:CreateLogGroup 인라인 정책 추가
+resource "aws_iam_role_policy" "{p}-iam-logs-policy" {{
+  name = "{p}-iam-logs-policy"
+  role = aws_iam_role.{p}-iam-role.id
+
+  policy = jsonencode({{
+    Version = "2012-10-17"
+    Statement = [{{
+      Effect   = "Allow"
+      Action   = ["logs:CreateLogGroup"]
+      Resource = "*"
+    }}]
+  }})
 }}
 
 # ── CloudWatch Log Group ────────────────────────────────────────────────
@@ -498,7 +513,7 @@ resource "aws_ecs_task_definition" "{p}-ecs-task-def" {{
     logConfiguration = {{
       logDriver = "awslogs"
       options = {{
-        "awslogs-group"         = aws_cloudwatch_log_group.{p}-cw-log.name
+        "awslogs-group"         = "/ecs/{p}-app"
         "awslogs-region"        = "{region}"
         "awslogs-stream-prefix" = "ecs"
       }}
@@ -520,6 +535,9 @@ resource "aws_ecs_service" "{p}-ecs-service" {{
   task_definition = aws_ecs_task_definition.{p}-ecs-task-def.arn
   desired_count   = {min_tasks}
   launch_type     = "FARGATE"
+
+  # [v6 수정②] 리스너 생성 완료 후 ECS Service 생성
+  depends_on = [aws_lb_listener.{p}-listener-http]
 
   network_configuration {{
     subnets = [
@@ -610,7 +628,7 @@ resource "aws_db_instance" "{p}-rds" {{
   skip_final_snapshot     = true
   backup_retention_period = {backup_days}
   storage_encrypted       = {encrypted}
-  deletion_protection     = true
+  deletion_protection     = false
 
   tags = {{
     Name        = "{p}-rds"
