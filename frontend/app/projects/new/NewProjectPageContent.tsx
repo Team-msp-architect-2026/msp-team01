@@ -11,6 +11,8 @@ import { Button } from '@/components/ui/button'
 
 type WizardPhase = 'project-create' | 'step1' | '2-1' | '2-2' | '2-3' | '2-4' | '2-5' | '2-6' | 'summary' | 'validate'
 
+const DEFAULT_CONTAINER_IMAGE = '611058323802.dkr.ecr.us-west-2.amazonaws.com/autoops-sample-app:latest'
+
 export default function NewProjectPageContent() {
   const router       = useRouter()
   const searchParams = useSearchParams()
@@ -321,7 +323,7 @@ if (phase === '2-1') {
             handleSaveStep('2-5', {
               vcpu:            1,
               memory:          2048,
-              container_image: (stepConfigs['2-5']?.container_image as string) || '',
+              container_image: (stepConfigs['2-5']?.container_image as string) || DEFAULT_CONTAINER_IMAGE,
             })
           }
           isSubmitting={isSubmitting}
@@ -340,7 +342,7 @@ if (phase === '2-1') {
             <div>
               <label className="text-sm font-medium">컨테이너 이미지 URI</label>
               <Input
-                placeholder="123456789012.dkr.ecr.us-west-2.amazonaws.com/my-app:latest"
+                defaultValue={DEFAULT_CONTAINER_IMAGE}
                 onChange={(e) =>
                   setStepConfigs((prev) => ({
                     ...prev,
@@ -391,7 +393,7 @@ if (phase === '2-1') {
     const isProd        = projectForm.environment === 'prod'
     const vpcCidr       = (stepConfigs['2-2']?.vpc_cidr as string) || '10.0.0.0/16'
     const albName       = `${projectForm.prefix}-${projectForm.environment}-alb`
-    const containerImage = (stepConfigs['2-5']?.container_image as string) || '-'
+    const containerImage = (stepConfigs['2-5']?.container_image as string) || DEFAULT_CONTAINER_IMAGE
 
     return (
       <div className="px-6 py-8 md:px-12 md:py-12 max-w-2xl space-y-4">
