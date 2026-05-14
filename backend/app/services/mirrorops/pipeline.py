@@ -57,6 +57,18 @@ class MirrorOpsPipelineService:
         db.commit()
 
         try:
+            # 기존 GCPMapping, AWSResource 삭제 (UUID 불일치 방지)
+            from app.models.gcp_mapping import GCPMapping as GCPMappingModel
+            from app.models.aws_resource import AWSResource as AWSResourceModel
+
+            db.query(GCPMappingModel).filter(
+                GCPMappingModel.project_id == project_id
+            ).delete()
+            db.query(AWSResourceModel).filter(
+                AWSResourceModel.project_id == project_id
+            ).delete()
+            db.commit()
+            
             # ① 리소스 감지 (FR-B-003)
             assumed_session = boto3.Session(
                 region_name=project.region,
@@ -64,6 +76,7 @@ class MirrorOpsPipelineService:
             detector = ResourceDetector(
                 role_arn=account.role_arn,
                 region=project.region,
+                external_id = project.user_id,
             )
             aws_resources = detector.detect_all(
                 project_id  = project_id,
@@ -85,43 +98,59 @@ class MirrorOpsPipelineService:
             sync.gcp_resources_mapped = len(mappings)
             db.commit()
 
-            # ③ GCP Terraform HCL 생성 + validate (FR-B-007)
-            generator          = GCPHCLGenerator()
-            hcl_code, work_dir = generator.generate(
-                project_id  = project_id,
-                mappings    = mappings,
-                gcp_project = settings.gcp_project_id,
-            )
-            passed, error_msg = generator.validate(work_dir)
-            generator.cleanup(work_dir)
+            # ── [추가] 변경 감지 — 이전 동기화와 리소스 수 비교 ──────────────
+            from app.models.sync_history import DRPackage as DRPackageModel
 
-            if not passed:
-                raise RuntimeError(f"GCP Terraform validate 실패:{error_msg}")
+            previous_sync = db.query(SyncHistory).filter(
+                SyncHistory.project_id == project_id,
+                SyncHistory.status     == "completed",
+                SyncHistory.sync_id    != sync.sync_id,
+            ).order_by(SyncHistory.started_at.desc()).first()
 
-            # ④ ~ ⑤ DR Package Phase 1 (Skopeo + RDS Snapshot + S3 저장)
-            assumed = ResourceDetector(account.role_arn, project.region).session
-            packager = DRPackager(assumed_session=assumed)
-            package  = packager.run_phase1(
-                project_id      = project_id,
-                sync_id         = sync.sync_id,
-                prefix          = project.prefix,
-                environment     = project.environment,
-                region          = project.region,
-                hcl_code        = hcl_code,
-                gcp_project     = settings.gcp_project_id,
-                db              = db,
-            )
+            has_changes = True  # 기본값: 변경 있음으로 간주
 
-            # Phase 1 완료
-            sync.status         = "completed"
-            sync.snapshot_status = "pending"   # Phase 2 대기 중
-            sync.completed_at   = datetime.utcnow()
-            project.last_synced_at = datetime.utcnow()
-            db.commit()
+            if previous_sync:
+                prev_count = previous_sync.aws_resources_detected or 0
+                curr_count = len(aws_resources)
+                if prev_count == curr_count and curr_count > 0:
+                    has_changes = False  # 리소스 수 동일 → 변경 없음으로 간주
 
-            # §7-7 sync_completed 이벤트: Phase 1 완료
-            # (WebSocket은 Epic 4에서 구현한 핸들러 재사용)
-            # sync_progress → sync_completed 순으로 전송
+            # ③ GCP Terraform HCL 생성 + DR Package — 변경 있을 때만 실행
+            if has_changes:
+                # 기존 is_latest 패키지 False로 변경
+                db.query(DRPackageModel).filter(
+                    DRPackageModel.project_id == project_id,
+                    DRPackageModel.is_latest  == True,
+                ).update({"is_latest": False})
+                db.commit()
+
+                generator          = GCPHCLGenerator()
+                hcl_code, work_dir = generator.generate(
+                    project_id  = project_id,
+                    mappings    = mappings,
+                    gcp_project = settings.gcp_project_id,
+                )
+                passed, error_msg = generator.validate(work_dir)
+                generator.cleanup(work_dir)
+
+                if not passed:
+                    raise RuntimeError(f"GCP Terraform validate 실패:{error_msg}")
+
+                assumed  = ResourceDetector(account.role_arn, project.region, project.user_id).session
+                packager = DRPackager(assumed_session=assumed)
+                package  = packager.run_phase1(
+                    project_id  = project_id,
+                    sync_id     = sync.sync_id,
+                    prefix      = project.prefix,
+                    environment = project.environment,
+                    region      = project.region,
+                    hcl_code    = hcl_code,
+                    gcp_project = settings.gcp_project_id,
+                    db          = db,
+                )
+            else:
+                # 변경 없음 → DR Package 재생성 스킵
+                print(f"[MirrorOps] 변경 없음 — DR Package 재생성 스킵 (project_id={project_id})")
 
         except Exception as e:
             sync.status        = "failed"

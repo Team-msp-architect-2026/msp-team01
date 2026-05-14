@@ -10,7 +10,7 @@ class BedrockMapper:
     Security Group, ALB, ECS 등 1:1 변환이 어려운 리소스에 사용한다.
     """
 
-    MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     def __init__(self):
         self.client = boto3.client(

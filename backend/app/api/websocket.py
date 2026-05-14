@@ -150,3 +150,144 @@ async def websocket_events(
             await websocket.close()
         except Exception:
             pass
+
+# ── MirrorOps WebSocket ─────────────────────────────────────────────
+
+@router.websocket("/ws/mirror/{project_id}")
+async def websocket_mirror_events(
+    websocket: WebSocket,
+    project_id: str,
+    sync_id: str = Query(None),
+    failover_id: str = Query(None),
+):
+    """
+    MirrorOps 동기화 및 페일오버 진행 상황을 실시간 스트리밍한다.
+    DB 폴링 방식 (2초 간격)
+    """
+    await websocket.accept()
+
+    if not sync_id and not failover_id:
+        await websocket.send_json({
+            "event_type": "error",
+            "project_id": project_id,
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
+            "data": {"message": "sync_id 또는 failover_id가 필요합니다."},
+        })
+        await websocket.close()
+        return
+
+    try:
+        while True:
+            db: Session = SessionLocal()
+            try:
+                # ── 동기화 이벤트 ──
+                if sync_id:
+                    from app.models.sync_history import SyncHistory
+                    sync = db.query(SyncHistory).filter(
+                        SyncHistory.sync_id == sync_id
+                    ).first()
+
+                    if sync:
+                        await websocket.send_json({
+                            "event_type": "sync_progress",
+                            "project_id": project_id,
+                            "timestamp":  datetime.now(timezone.utc).isoformat(),
+                            "data": {
+                                "sync_id":                sync_id,
+                                "status":                 sync.status,
+                                "aws_resources_detected": sync.aws_resources_detected,
+                                "gcp_resources_mapped":   sync.gcp_resources_mapped,
+                            },
+                        })
+
+                        if sync.status == "completed":
+                            await websocket.send_json({
+                                "event_type": "sync_completed",
+                                "project_id": project_id,
+                                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                                "data": {
+                                    "sync_id":                sync_id,
+                                    "aws_resources_detected": sync.aws_resources_detected,
+                                    "gcp_resources_mapped":   sync.gcp_resources_mapped,
+                                },
+                            })
+                            break
+
+                        elif sync.status == "failed":
+                            await websocket.send_json({
+                                "event_type": "sync_failed",
+                                "project_id": project_id,
+                                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                                "data": {
+                                    "sync_id":       sync_id,
+                                    "error_message": sync.error_message,
+                                },
+                            })
+                            break
+
+                # ── 페일오버 이벤트 ──
+                if failover_id:
+                    from app.models.failover_history import FailoverHistory
+                    fh = db.query(FailoverHistory).filter(
+                        FailoverHistory.failover_id == failover_id
+                    ).first()
+
+                    if fh:
+                        await websocket.send_json({
+                            "event_type": "failover_progress",
+                            "project_id": project_id,
+                            "timestamp":  datetime.now(timezone.utc).isoformat(),
+                            "data": {
+                                "failover_id":         failover_id,
+                                "status":              fh.status,
+                                "gcp_resources_created": fh.gcp_resources_created,
+                            },
+                        })
+
+                        if fh.status == "completed":
+                            await websocket.send_json({
+                                "event_type": "failover_completed",
+                                "project_id": project_id,
+                                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                                "data": {
+                                    "failover_id":         failover_id,
+                                    "gcp_resources_created": fh.gcp_resources_created,
+                                    "actual_rto_seconds":  fh.actual_rto_seconds,
+                                },
+                            })
+                            break
+
+                        elif fh.status == "failed":
+                            await websocket.send_json({
+                                "event_type": "failover_failed",
+                                "project_id": project_id,
+                                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                                "data": {
+                                    "failover_id":   failover_id,
+                                    "error_message": fh.error_message,
+                                },
+                            })
+                            break
+
+            finally:
+                db.close()
+
+            await asyncio.sleep(2)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({
+                "event_type": "error",
+                "project_id": project_id,
+                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                "data": {"message": str(e)},
+            })
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass

@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.models.user import User
 from app.models.project import Project
 from app.models.aws_resource import AWSResource
@@ -29,14 +29,14 @@ def get_dr_status(
 
     latest_package = db.query(DRPackage).filter(
         DRPackage.project_id == project_id,
-        DRPackage.is_latest   == True,
+        DRPackage.is_latest  == True,
     ).first()
 
     return {
         "success": True,
         "data": {
-            "dr_status":         project.dr_status,
-            "last_synced_at":    (
+            "dr_status":      project.dr_status,
+            "last_synced_at": (
                 project.last_synced_at.isoformat()
                 if project.last_synced_at else None
             ),
@@ -98,6 +98,7 @@ def get_resources(
 @router.post("/{project_id}/sync", status_code=202)
 def manual_sync(
     project_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -105,7 +106,9 @@ def manual_sync(
 
     from app.services.mirrorops.pipeline import MirrorOpsPipelineService
     pipeline = MirrorOpsPipelineService()
-    sync_id  = pipeline.run(
+
+    background_tasks.add_task(
+        pipeline.run,
         project_id    = project_id,
         deployment_id = "",
         trigger_type  = "manual",
@@ -115,8 +118,7 @@ def manual_sync(
     return {
         "success": True,
         "data": {
-            "sync_id":      sync_id,
-            "status":       "running",
+            "status":        "running",
             "websocket_url": f"wss://api.autoops.io/ws/events/{project_id}",
         },
     }
@@ -134,12 +136,12 @@ def get_dr_package(
 
     latest = db.query(DRPackage).filter(
         DRPackage.project_id == project_id,
-        DRPackage.is_latest   == True,
+        DRPackage.is_latest  == True,
     ).first()
 
     history = db.query(DRPackage).filter(
         DRPackage.project_id == project_id,
-        DRPackage.is_latest   == False,
+        DRPackage.is_latest  == False,
     ).order_by(DRPackage.created_at.desc()).limit(10).all()
 
     return {
@@ -169,14 +171,14 @@ def get_sync_history(
         "success": True,
         "data": [
             {
-                "sync_id":              s.sync_id,
-                "trigger_type":         s.trigger_type,
-                "status":               s.status,
-                "snapshot_status":      s.snapshot_status,
+                "sync_id":                s.sync_id,
+                "trigger_type":           s.trigger_type,
+                "status":                 s.status,
+                "snapshot_status":        s.snapshot_status,
                 "aws_resources_detected": s.aws_resources_detected,
-                "gcp_resources_mapped": s.gcp_resources_mapped,
-                "error_message":        s.error_message,
-                "started_at":           s.started_at.isoformat(),
+                "gcp_resources_mapped":   s.gcp_resources_mapped,
+                "error_message":          s.error_message,
+                "started_at":             s.started_at.isoformat(),
                 "completed_at": s.completed_at.isoformat() if s.completed_at else None,
             }
             for s in history
@@ -206,19 +208,19 @@ def _package_to_dict(p: DRPackage) -> dict:
         "snapshot_status": p.snapshot_status,
         "components": {
             "terraform_code": {
-                "status": "ready" if p.terraform_code_path else "pending",
+                "status":  "ready" if p.terraform_code_path else "pending",
                 "s3_path": p.terraform_code_path,
             },
             "container_image": {
-                "status":     "ready" if p.gcr_image_uri else "pending",
-                "gcr_uri":    p.gcr_image_uri,
+                "status":         "ready" if p.gcr_image_uri else "pending",
+                "gcr_uri":        p.gcr_image_uri,
                 "image_ref_path": p.image_ref_path,
             },
             "db_snapshot": {
-                "status":          p.snapshot_status,
+                "status":            p.snapshot_status,
                 "snapshot_ref_path": p.snapshot_ref_path,
-                "export_s3_path":  p.snapshot_export_s3_path,
-                "export_format":   "parquet",
+                "export_s3_path":    p.snapshot_export_s3_path,
+                "export_format":     "parquet",
             },
         },
         "dr_report": {
@@ -234,10 +236,10 @@ def _package_to_dict(p: DRPackage) -> dict:
         "created_at": p.created_at.isoformat(),
     }
 
+
 import uuid
 import subprocess
 import tempfile
-import os
 from pathlib import Path
 from app.models.failover_history import FailoverHistory
 
@@ -251,6 +253,7 @@ class FailoverRequest(BaseModel):
 def failover(
     project_id: str,
     body: FailoverRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -262,32 +265,29 @@ def failover(
             detail={"code": "VALIDATION_ERROR", "message": "mode는 simulation 또는 actual이어야 합니다."},
         )
 
+    latest_package = None
+
     if body.mode == "actual":
-        # §5-5 ① confirm_project_name 검증
         expected_name = f"{project.prefix}-{project.environment}"
         if body.confirm_project_name != expected_name:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
-                    "code": "VALIDATION_ERROR",
-                    "message": (
-                        f"confirm_project_name이 일치하지 않습니다. "
-                        f"'{expected_name}'을 입력하세요."
-                    ),
+                    "code":    "VALIDATION_ERROR",
+                    "message": f"confirm_project_name이 일치하지 않습니다. '{expected_name}'을 입력하세요.",
                 },
             )
 
-        # §5-5 ② DR Package status 확인
         latest_package = db.query(DRPackage).filter(
             DRPackage.project_id == project_id,
-            DRPackage.is_latest   == True,
+            DRPackage.is_latest  == True,
         ).first()
 
         if not latest_package:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
-                    "code": "NOT_FOUND",
+                    "code":    "NOT_FOUND",
                     "message": "DR Package가 존재하지 않습니다. 동기화를 먼저 실행하세요.",
                 },
             )
@@ -296,7 +296,7 @@ def failover(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
-                    "code": "CONFLICT",
+                    "code":    "CONFLICT",
                     "message": (
                         "DR Package가 준비되지 않았습니다. "
                         "DB 스냅샷 Export 완료 후 페일오버를 실행하세요. "
@@ -305,7 +305,6 @@ def failover(
                 },
             )
 
-    # ── ✅ 수정된 부분: simulation/actual 모두 안전하게 package_id 처리 ──
     failover_id = f"fo_{str(uuid.uuid4())[:8]}"
 
     sim_package = db.query(DRPackage).filter(
@@ -328,6 +327,16 @@ def failover(
     db.add(fh)
     db.commit()
 
+    # simulation 실행 연결
+    if body.mode == "simulation" and sim_package:
+        background_tasks.add_task(
+            _run_failover_simulation,
+            project_id  = project_id,
+            failover_id = failover_id,
+            hcl_code    = sim_package.terraform_code_path or "",
+            db          = SessionLocal(),
+        )
+
     return {
         "success": True,
         "data": {
@@ -348,9 +357,13 @@ def _run_failover_simulation(
     work_dir = tempfile.mkdtemp(prefix=f"autoops-failover-{project_id[:8]}-")
     try:
         (Path(work_dir) / "main.tf").write_text(hcl_code, encoding="utf-8")
-        subprocess.run(["terraform", "init", "-backend=false"], cwd=work_dir, capture_output=True)
-        result = subprocess.run(
-            ["terraform", "plan", "-json"], cwd=work_dir, capture_output=True, text=True
+        subprocess.run(
+            ["terraform", "init", "-backend=false"],
+            cwd=work_dir, capture_output=True
+        )
+        subprocess.run(
+            ["terraform", "plan", "-json"],
+            cwd=work_dir, capture_output=True, text=True
         )
         add_count = 11
 
@@ -358,11 +371,12 @@ def _run_failover_simulation(
             FailoverHistory.failover_id == failover_id
         ).first()
         if fh:
-            fh.status = "completed"
+            fh.status              = "completed"
             fh.gcp_resources_created = add_count
-            fh.actual_rto_seconds    = 12 * 60
+            fh.actual_rto_seconds  = 12 * 60
             fh.completed_at = __import__("datetime").datetime.utcnow()
             db.commit()
     finally:
         import shutil
         shutil.rmtree(work_dir, ignore_errors=True)
+        db.close()

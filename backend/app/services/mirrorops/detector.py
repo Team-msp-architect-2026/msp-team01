@@ -37,25 +37,26 @@ class ResourceDetector:
     Cross-Account IAM Role Assume 후 사용자 계정의 리소스를 조회한다.
     """
 
-    def __init__(self, role_arn: str, region: str):
-        self.region   = region
-        self.session  = self._assume_role(role_arn)
-        self.config   = self.session.client("config", region_name=region)
+    def __init__(self, role_arn: str, region: str, external_id: str = ""):
+        self.region  = region
+        self.session = self._assume_role(role_arn, external_id)
 
-    def _assume_role(self, role_arn: str) -> boto3.Session:
-        """Cross-Account IAM Role을 Assume하고 boto3 Session을 반환한다."""
-        sts  = boto3.client("sts", region_name="us-west-2")
-        resp = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName="autoops-mirrorops-detect",
-            DurationSeconds=3600,
-        )
+    def _assume_role(self, role_arn: str, external_id: str = "") -> boto3.Session:
+        sts    = boto3.client("sts", region_name="us-west-2")
+        kwargs = {
+            "RoleArn":         role_arn,
+            "RoleSessionName": "autoops-mirrorops-detect",
+            "DurationSeconds": 3600,
+        }
+        if external_id:
+            kwargs["ExternalId"] = external_id
+        resp = sts.assume_role(**kwargs)
         creds = resp["Credentials"]
         return boto3.Session(
-            aws_access_key_id=creds["AccessKeyId"],
-            aws_secret_access_key=creds["SecretAccessKey"],
-            aws_session_token=creds["SessionToken"],
-            region_name=self.region,
+            aws_access_key_id     = creds["AccessKeyId"],
+            aws_secret_access_key = creds["SecretAccessKey"],
+            aws_session_token     = creds["SessionToken"],
+            region_name           = self.region,
         )
 
     def detect_all(
@@ -96,10 +97,6 @@ class ResourceDetector:
     def _query_resources(
         self, resource_type: str, name_prefix: str
     ) -> list[dict]:
-        """
-        AWS Config list_discovered_resources로 리소스를 조회한다.
-        name_prefix로 필터링해 해당 프로젝트 리소스만 반환한다.
-        """
         config_client = self.session.client("config", region_name=self.region)
         results = []
 
@@ -109,10 +106,6 @@ class ResourceDetector:
                 res_name = item.get("resourceName", "")
                 res_id   = item.get("resourceId", "")
 
-                # 네이밍 규칙 기반 필터링
-                if not res_name.startswith(name_prefix):
-                    continue
-
                 # 상세 정보 조회
                 detail = config_client.get_resource_config_history(
                     resourceType=resource_type,
@@ -121,6 +114,8 @@ class ResourceDetector:
                 )
                 config_items = detail.get("configurationItems", [])
                 config_json  = {}
+                # _query_resources 내부 config_json 파싱 부분 수정
+
                 if config_items:
                     import json
                     raw = config_items[0].get("configuration", "{}")
@@ -129,9 +124,30 @@ class ResourceDetector:
                     except json.JSONDecodeError:
                         config_json = {}
 
+                    # ← 추가: 최상위 tags 필드에서 Name 태그 추출
+                    top_tags = config_items[0].get("tags", {})
+                    if top_tags:
+                        config_json["tags"] = top_tags
+
+                # Name 태그 추출
+                name_tag = ""
+                tags = config_json.get("tags", {})
+                if isinstance(tags, dict):
+                    name_tag = tags.get("Name", "")
+                elif isinstance(tags, list):
+                    for tag in tags:
+                        if tag.get("key") == "Name":
+                            name_tag = tag.get("value", "")
+                            break
+
+                # Name 태그 또는 resourceName 둘 중 하나라도 prefix 일치하면 통과
+                effective_name = name_tag or res_name
+                if not effective_name.startswith(name_prefix):
+                    continue
+
                 results.append({
                     "id":     res_id,
-                    "name":   res_name,
+                    "name":   effective_name,
                     "config": config_json,
                 })
 
