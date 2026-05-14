@@ -31,4 +31,5 @@ build/
 
 # OS
 .DS_Store
-Thumbs.db
+Thumbs.db 
+session-manager-plugin.deb

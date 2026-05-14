@@ -648,6 +648,7 @@ def deployment_action(
             hcl_s3_path=hcl_s3_path,
             role_arn=account.role_arn,
             region=project.region,
+            user_id=project.user_id,
             subnet_ids=settings.platform_subnet_ids.split(","),
             security_group_ids=settings.platform_sg_ids.split(","),
         )
@@ -678,6 +679,7 @@ def deployment_action(
             hcl_s3_path=hcl_s3_path,
             role_arn=account.role_arn,
             region=project.region,
+            user_id=project.user_id,
             subnet_ids=settings.platform_subnet_ids.split(","),
             security_group_ids=settings.platform_sg_ids.split(","),
         )
@@ -691,6 +693,7 @@ def deployment_action(
             deployment_id=deployment_id,
             role_arn=account.role_arn,
             region=project.region,
+            user_id=project.user_id,
             subnet_ids=settings.platform_subnet_ids.split(","),
             security_group_ids=settings.platform_sg_ids.split(","),
         )
