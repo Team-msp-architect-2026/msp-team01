@@ -1,4 +1,3 @@
-# backend/app/services/craftops/validator.py
 import json
 import os
 import subprocess
@@ -41,14 +40,19 @@ class ValidationLoop:
     Terraform HCL에 대해 4단계 Validation을 순차 실행한다. (§4-4 Step 3)
 
     ① terraform validate  — Python 템플릿 기반이므로 항상 유효. 실패 시 즉시 중단.
-    ② tfsec + checkov     — CRITICAL 시 배포 차단 + fixed_hcl 반환 (FR-A-012)
+    ② tfsec + checkov      — CRITICAL 시 배포 차단 + fixed_hcl 반환 (FR-A-012)
     ③ Infracost           — 리소스별 월 예상 비용 (FR-A-013)
-    ④ terraform plan      — 리소스 변경 미리보기 (FR-A-014)
+    ④ terraform plan       — 리소스 변경 미리보기 (FR-A-014)
 
     v2 변경: Gemini Self-Correction Loop 제거.
     hcl_template.py 기반 HCL은 항상 유효하므로 correction 불필요.
-    CRITICAL 보안 이슈 발생 시에도 Gemini 호출 없이 fixed_hcl 빈 값으로 반환.
+
+    v3 변경: AVD-AWS-0054 (ALB HTTP Listener) 보안 예외 처리 추가.
+    CloudFront에서 SSL Termination을 처리하므로 ALB의 HTTP 리스너는 운영 정책상 허용한다.
     """
+
+    # 운영 정책상 허용되는 보안 규칙 (CRITICAL 차단 제외)
+    EXEMPTED_RULES = ["AVD-AWS-0054"]
 
     def __init__(self):
         pass
@@ -86,7 +90,13 @@ class ValidationLoop:
         result.security_issues = tfsec_result["issues"] + checkov_result["issues"]
 
         for issue in result.security_issues:
+            rule_id = issue.get("rule_id", "")
             sev = issue.get("severity", "").upper()
+            
+            # [운영 정책] 허용된 규칙은 보안 등급 집계에서 제외
+            if rule_id in self.EXEMPTED_RULES:
+                continue
+
             if sev == "CRITICAL":
                 result.security_critical_count += 1
             elif sev == "HIGH":
@@ -94,8 +104,8 @@ class ValidationLoop:
             elif sev == "MEDIUM":
                 result.security_medium_count += 1
 
+        # 실질적인(운영 정책 위반) CRITICAL 이슈가 있는 경우에만 배포 차단
         if result.security_critical_count > 0:
-            # CRITICAL 발견: 배포 차단. fixed_hcl은 빈 값 반환 (Gemini 미사용)
             result.security_fixed_hcl = ""
             result.security_passed = False
             return result
