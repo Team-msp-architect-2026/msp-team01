@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fortune | 간편 송금 서비스</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', sans-serif;
+      background: #0a0f1e;
+      color: #e8eaf0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Top Bar ── */
+    .topbar {
+      padding: 16px 40px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      background: rgba(10,15,30,0.9);
+      backdrop-filter: blur(8px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .logo {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #fff;
+    }
+    .logo span {
+      color: #4f9eff;
+    }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #6ee7b7;
+      background: rgba(110, 231, 183, 0.08);
+      border: 1px solid rgba(110, 231, 183, 0.2);
+      border-radius: 100px;
+      padding: 6px 14px;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #6ee7b7;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 80px 40px 60px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -200px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 500px;
+      background: radial-gradient(ellipse, rgba(79,158,255,0.12) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-eyebrow {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: #4f9eff;
+      margin-bottom: 20px;
+    }
+    .hero-title {
+      font-size: clamp(36px, 5vw, 60px);
+      font-weight: 800;
+      line-height: 1.15;
+      letter-spacing: -1.5px;
+      color: #fff;
+      margin-bottom: 20px;
+    }
+    .hero-title .highlight {
+      background: linear-gradient(135deg, #4f9eff, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero-sub {
+      font-size: 18px;
+      color: #8b92a5;
+      line-height: 1.7;
+      max-width: 520px;
+      margin-bottom: 48px;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .btn-primary {
+      background: #4f9eff;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 14px 28px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+      text-decoration: none;
+    }
+    .btn-primary:hover { background: #3a8df0; transform: translateY(-1px); }
+    .btn-secondary {
+      background: transparent;
+      color: #e8eaf0;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 10px;
+      padding: 14px 28px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: border-color 0.2s, transform 0.1s;
+      text-decoration: none;
+    }
+    .btn-secondary:hover { border-color: rgba(255,255,255,0.35); transform: translateY(-1px); }
+
+    /* ── Info Cards ── */
+    .cards-section {
+      padding: 0 40px 80px;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      max-width: 560px;
+      margin: 0 auto;
+      width: 100%;
+    }
+    .card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 14px;
+      padding: 24px;
+      flex: 1;
+      min-width: 220px;
+      max-width: 260px;
+    }
+    .card-icon {
+      font-size: 28px;
+      margin-bottom: 12px;
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+    .card-desc {
+      font-size: 13px;
+      color: #6b7280;
+      line-height: 1.6;
+    }
+    .card-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: #4f9eff;
+      margin-top: 10px;
+    }
+
+    /* ── Infra notice ── */
+    .infra-banner {
+      margin: 0 40px 40px;
+      max-width: 820px;
+      width: calc(100% - 80px);
+      margin-left: auto;
+      margin-right: auto;
+      border: 1px solid rgba(79,158,255,0.2);
+      background: rgba(79,158,255,0.04);
+      border-radius: 12px;
+      padding: 20px 24px;
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+    }
+    .infra-icon {
+      font-size: 22px;
+      margin-top: 1px;
+      flex-shrink: 0;
+    }
+    .infra-text h4 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #4f9eff;
+      margin-bottom: 4px;
+    }
+    .infra-text p {
+      font-size: 13px;
+      color: #6b7280;
+      line-height: 1.6;
+    }
+    .infra-text code {
+      font-family: 'Menlo', monospace;
+      font-size: 11px;
+      background: rgba(79,158,255,0.12);
+      color: #93c5fd;
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding: 20px 40px;
+      text-align: center;
+      font-size: 12px;
+      color: #374151;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    footer span { color: #6b7280; }
+    .env-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+    .env-tag {
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 100px;
+      border: 1px solid rgba(255,255,255,0.08);
+      color: #6b7280;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    @media (max-width: 600px) {
+      .topbar { padding: 14px 20px; }
+      .hero { padding: 60px 20px 40px; }
+      .cards-section { padding: 0 20px 60px; grid-template-columns: 1fr; max-width: 100%; }
+      .infra-banner { margin: 0 20px 32px; width: calc(100% - 40px); }
+      footer { padding: 16px 20px; font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Topbar -->
+  <nav class="topbar">
+    <div class="logo">Fortune<span>.</span></div>
+    <div class="status-badge">
+      <div class="status-dot"></div>
+      서비스 정상 운영 중
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <p class="hero-eyebrow">Beta Service Coming Soon</p>
+    <h1 class="hero-title">
+      송금, 이제<br>
+      <span class="highlight">더 간편하게</span>
+    </h1>
+    <p class="hero-sub">
+      전자금융업 등록 완료. 6주 후 베타 서비스 오픈 예정.<br>
+      규제 준수 인프라 위에서 빠르고 안전하게 운영됩니다.
+    </p>
+    <div class="btn-group">
+      <a class="btn-primary" href="#">베타 사전 신청</a>
+      <a class="btn-secondary" href="#">서비스 소개 보기</a>
+    </div>
+  </section>
+
+  <!-- Cards -->
+  <div class="cards-section">
+    <div class="card">
+      <div class="card-icon">🏦</div>
+      <div class="card-title">전자금융업 등록</div>
+      <div class="card-desc">금융위원회 전자금융업 등록을 완료하고 규제 요건을 충족한 서비스입니다.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🛡️</div>
+      <div class="card-title">망분리 3-Tier 아키텍처</div>
+      <div class="card-desc">Public / Private 망분리 구조로 금융보안 심사 요건을 자동 충족합니다.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">☁️</div>
+      <div class="card-title">멀티클라우드 DR</div>
+      <div class="card-desc">AWS → GCP 재해복구 파이프라인으로 클라우드 출구전략 요건을 충족합니다.</div>
+      <div class="card-value">RTO 15분</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⚡</div>
+      <div class="card-title">팀 규모</div>
+      <div class="card-desc">4명의 소규모 팀이 인프라 엔지니어 없이 직접 구성하고 운영합니다.</div>
+    </div>
+  </div>
+
+  <!-- Infra Banner -->
+  <div class="infra-banner">
+    <div class="infra-icon">🚀</div>
+    <div class="infra-text">
+      <h4>AutoOps 기반 인프라 자동화</h4>
+      <p>
+        이 서비스는 <strong>AutoOps</strong> CraftOps가 자동 생성한 3-Tier 인프라 위에서 운영됩니다.
+        VPC, ALB, ECS, RDS 16개 리소스가 자연어 명령 한 번으로 배포되었으며,
+        MirrorOps를 통해 GCP DR 패키지가 자동 동기화 중입니다.
+        현재 리전: <code>us-west-2 (Oregon)</code> · DR 리전: <code>us-west1 (GCP)</code>
+      </p>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <span>© 2026 Fortune Inc. — 전자금융업 등록번호 제2026-XXX-XXXXX호</span>
+    <div class="env-tags">
+      <span class="env-tag">AWS ECS Fargate</span>
+      <span class="env-tag">ALB</span>
+      <span class="env-tag">Private Subnet</span>
+      <span class="env-tag">AutoOps v1.0</span>
+    </div>
+  </footer>
+
+</body>
+</html>
