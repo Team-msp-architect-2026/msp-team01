@@ -60,17 +60,37 @@ provider "google"{{
         return full_hcl, work_dir
 
     def validate(self, work_dir: str) -> tuple[bool, str]:
-        """
-        terraform validate로 생성된 GCP HCL의 유효성을 검증한다. (FR-B-007)
-        반환: (passed, error_message)
-        """
-        # terraform init (-backend=false: 로컬 검증용)
-        self._run_cmd(["terraform", "init", "-backend=false"], work_dir)
+        # terraform init
+        init_result = self._run_cmd(["terraform", "init", "-backend=false"], work_dir)
+        if init_result["returncode"] != 0:
+            error_msg = f"terraform init 실패: {init_result['stdout']} {init_result['stderr']}"
+            print(f"[GCPHCLGenerator] {error_msg}")
+            return False, error_msg
 
         result = self._run_cmd(
             ["terraform", "validate", "-json"], work_dir
         )
-        return result["returncode"] == 0, result["stderr"]
+
+        print(f"[GCPHCLGenerator] validate returncode: {result['returncode']}")
+        print(f"[GCPHCLGenerator] validate stdout: {result['stdout'][:500]}")
+        print(f"[GCPHCLGenerator] validate stderr: {result['stderr'][:500]}")
+
+        if result["returncode"] == 0:
+            return True, ""
+
+        import json
+        try:
+            output = json.loads(result["stdout"])
+            diagnostics = output.get("diagnostics", [])
+            error_msg = "\n".join([
+                f"{d.get('severity', '')}: {d.get('summary', '')} — {d.get('detail', '')}"
+                for d in diagnostics
+            ])
+        except Exception:
+            error_msg = result["stdout"] or result["stderr"]
+
+        print(f"[GCPHCLGenerator] validate 에러: {error_msg}")
+        return False, error_msg
 
     def cleanup(self, work_dir: str) -> None:
         import shutil

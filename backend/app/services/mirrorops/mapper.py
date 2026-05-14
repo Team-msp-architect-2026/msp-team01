@@ -228,17 +228,17 @@ class MappingEngine:
             pad   = " " * indent
             for k, v in d.items():
                 if isinstance(v, dict):
-                    lines.append(f"{pad}{k}{{")
+                    lines.append(f"{pad}{k} {{")
                     lines.append(dict_to_hcl(v, indent + 2))
                     lines.append(f"{pad}}}")
                 elif isinstance(v, bool):
-                    lines.append(f'{pad}{k} ={str(v).lower()}')
+                    lines.append(f'{pad}{k} = {str(v).lower()}')
                 elif isinstance(v, (int, float)):
-                    lines.append(f'{pad}{k} ={v}')
+                    lines.append(f'{pad}{k} = {v}')
                 else:
                     lines.append(f'{pad}{k} = "{v}"')
             return "\n".join(lines)
 
         resource_name = name.replace("-", "_")
         body = dict_to_hcl(attrs)
-        return f'resource "{gcp_type}" "{resource_name}"{{\n{body}\n}}'
+        return f'resource "{gcp_type}" "{resource_name}" {{\n{body}\n}}'

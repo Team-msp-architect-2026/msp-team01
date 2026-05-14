@@ -66,15 +66,18 @@ async def start_sqs_worker():
 
 
 async def _handle_deployment_completed(detail: dict):
-    """§7-8 InfraDeploymentCompleted 이벤트 처리"""
     db = SessionLocal()
     try:
         pipeline = MirrorOpsPipelineService()
-        pipeline.run(
-            project_id    = detail["project_id"],
-            deployment_id = detail["deployment_id"],
-            trigger_type  = "deployment_completed",
-            db            = db,
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: pipeline.run(
+                project_id    = detail["project_id"],
+                deployment_id = detail["deployment_id"],
+                trigger_type  = "deployment_completed",
+                db            = db,
+            )
         )
     finally:
         db.close()
@@ -114,7 +117,7 @@ async def _handle_rds_snapshot_completed(detail: dict):
         ).first()
 
         from app.services.mirrorops.detector import ResourceDetector
-        assumed = ResourceDetector(account.role_arn, project.region).session
+        assumed = ResourceDetector(account.role_arn, project.region, project.user_id).session
         from app.services.mirrorops.dr_packager import DRPackager
         packager = DRPackager(assumed_session=assumed)
         packager.run_phase2(
@@ -122,11 +125,10 @@ async def _handle_rds_snapshot_completed(detail: dict):
             package_id      = package.package_id,
             snapshot_arn    = snapshot_arn,
             export_role_arn = f"arn:aws:iam::{account.aws_account_id}:role/AutoOpsRDSExportRole",
-            kms_key_id      = "alias/aws/rds",   # 기본 KMS 키
+            kms_key_id      = "alias/aws/rds",
             db              = db,
         )
 
-        # project.dr_status → "ready"
         if project:
             project.dr_status = "ready"
             db.commit()
