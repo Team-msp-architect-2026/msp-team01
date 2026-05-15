@@ -1,19 +1,18 @@
 import boto3
+import json
 from typing import Any
 from sqlalchemy.orm import Session
 from app.models.aws_resource import AWSResource
 from datetime import datetime
 
 
-# 감지 대상 리소스 타입 매핑
-# AWS Config resource type → boto3 서비스/메서드
 RESOURCE_TYPE_MAP: dict[str, dict] = {
-    "AWS::EC2::VPC":                   {"service": "ec2",  "method": "describe_vpcs",           "key": "Vpcs"},
-    "AWS::EC2::Subnet":                {"service": "ec2",  "method": "describe_subnets",         "key": "Subnets"},
+    "AWS::EC2::VPC":                   {"service": "ec2",  "method": "describe_vpcs",            "key": "Vpcs"},
+    "AWS::EC2::Subnet":                {"service": "ec2",  "method": "describe_subnets",          "key": "Subnets"},
     "AWS::EC2::InternetGateway":       {"service": "ec2",  "method": "describe_internet_gateways","key": "InternetGateways"},
-    "AWS::EC2::NatGateway":            {"service": "ec2",  "method": "describe_nat_gateways",    "key": "NatGateways"},
-    "AWS::EC2::RouteTable":            {"service": "ec2",  "method": "describe_route_tables",    "key": "RouteTables"},
-    "AWS::EC2::SecurityGroup":         {"service": "ec2",  "method": "describe_security_groups", "key": "SecurityGroups"},
+    "AWS::EC2::NatGateway":            {"service": "ec2",  "method": "describe_nat_gateways",     "key": "NatGateways"},
+    "AWS::EC2::RouteTable":            {"service": "ec2",  "method": "describe_route_tables",     "key": "RouteTables"},
+    "AWS::EC2::SecurityGroup":         {"service": "ec2",  "method": "describe_security_groups",  "key": "SecurityGroups"},
     "AWS::ElasticLoadBalancingV2::LoadBalancer": {
         "service": "elbv2", "method": "describe_load_balancers", "key": "LoadBalancers"
     },
@@ -27,7 +26,7 @@ RESOURCE_TYPE_MAP: dict[str, dict] = {
     "AWS::Logs::LogGroup":             {"service": "logs", "method": "describe_log_groups",      "key": "logGroups"},
     "AWS::RDS::DBSubnetGroup":         {"service": "rds",  "method": "describe_db_subnet_groups","key": "DBSubnetGroups"},
     "AWS::RDS::DBInstance":            {"service": "rds",  "method": "describe_db_instances",    "key": "DBInstances"},
-    "AWS::KMS::Key":                   {"service": "kms",  "method": "list_keys",               "key": "Keys"},
+    "AWS::KMS::Key":                   {"service": "kms",  "method": "list_keys",                "key": "Keys"},
 }
 
 
@@ -50,7 +49,7 @@ class ResourceDetector:
         }
         if external_id:
             kwargs["ExternalId"] = external_id
-        resp = sts.assume_role(**kwargs)
+        resp  = sts.assume_role(**kwargs)
         creds = resp["Credentials"]
         return boto3.Session(
             aws_access_key_id     = creds["AccessKeyId"],
@@ -72,24 +71,33 @@ class ResourceDetector:
         """
         name_prefix = f"{prefix}-{environment}-"
         detected    = []
+        # [추가] (resource_type, name) 기준 중복 방지
+        # - ResourceDeleted 필터로 걸러지지 않은 엣지 케이스 방어
+        seen_names: set = set()
 
         for resource_type in RESOURCE_TYPE_MAP:
             try:
                 resources = self._query_resources(resource_type, name_prefix)
                 for res in resources:
+                    # [추가] 동일 타입+이름 중복 최종 방어
+                    dedup_key = (resource_type, res.get("name", ""))
+                    if dedup_key in seen_names:
+                        print(f"[ResourceDetector] 중복 스킵: {resource_type} '{res.get('name', '')}'")
+                        continue
+                    seen_names.add(dedup_key)
+
                     aws_resource = AWSResource(
-                        project_id    = project_id,
-                        resource_type = resource_type,
-                        resource_name = res.get("name", ""),
+                        project_id      = project_id,
+                        resource_type   = resource_type,
+                        resource_name   = res.get("name", ""),
                         resource_id_aws = res.get("id", ""),
-                        config_json   = res.get("config", {}),
-                        detected_at   = datetime.utcnow(),
+                        config_json     = res.get("config", {}),
+                        detected_at     = datetime.utcnow(),
                     )
                     db.add(aws_resource)
                     detected.append(aws_resource)
             except Exception as e:
-                # 특정 리소스 타입 조회 실패 시 로그 남기고 계속 진행
-                print(f"[경고]{resource_type} 감지 실패:{e}")
+                print(f"[경고] {resource_type} 감지 실패: {e}")
 
         db.commit()
         return detected
@@ -98,13 +106,19 @@ class ResourceDetector:
         self, resource_type: str, name_prefix: str
     ) -> list[dict]:
         config_client = self.session.client("config", region_name=self.region)
-        results = []
+        results  = []
+        seen_ids: set = set()  # [추가] 동일 resource_id 페이지 중복 방지
 
         paginator = config_client.get_paginator("list_discovered_resources")
         for page in paginator.paginate(resourceType=resource_type):
             for item in page.get("resourceIdentifiers", []):
                 res_name = item.get("resourceName", "")
                 res_id   = item.get("resourceId", "")
+
+                # [추가] 동일 resource_id 중복 방지 (Config 페이지네이션 중복 케이스)
+                if res_id in seen_ids:
+                    continue
+                seen_ids.add(res_id)
 
                 # 상세 정보 조회
                 detail = config_client.get_resource_config_history(
@@ -114,20 +128,21 @@ class ResourceDetector:
                 )
                 config_items = detail.get("configurationItems", [])
                 config_json  = {}
-                # _query_resources 내부 config_json 파싱 부분 수정
 
                 if config_items:
-                    import json
+                    # [추가] 삭제된 리소스 필터링 (삭제 후 재생성 시 구버전 제거)
+                    item_status = config_items[0].get("configurationItemStatus", "")
+                    if item_status == "ResourceDeleted":
+                        continue
+
                     raw = config_items[0].get("configuration", "{}")
                     try:
                         config_json = json.loads(raw) if isinstance(raw, str) else raw
                     except json.JSONDecodeError:
                         config_json = {}
 
-                    # ← 추가: 최상위 tags 필드에서 Name 태그 추출
                     top_tags = config_items[0].get("tags", {})
-                    if top_tags:
-                        config_json["tags"] = top_tags
+                    config_json["tags"] = top_tags
 
                 # Name 태그 추출
                 name_tag = ""

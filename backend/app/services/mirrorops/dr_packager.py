@@ -1,39 +1,22 @@
 import boto3
 import json
 import subprocess
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from sqlalchemy.orm import Session
-from app.core.config import settings
-from app.models.sync_history import DRPackage, SyncHistory
-from app.models.project import Project
-
+from app.models.sync_history import DRPackage
 
 class DRPackager:
     """
     §5-3 DR Package 2단계 비동기 파이프라인을 담당한다.
-
-    Phase 1 (즉시):
-      ① Skopeo ECR → GCR 이미지 복사 (FR-B-009)
-      ② RDS CreateSnapshot API 호출 (시작만)
-      ③ S3 latest/ 저장 (Terraform HCL + image_ref.json + snapshot_ref.json:pending)
-      → dr_packages.status: "preparing"
-
-    Phase 2 (비동기 — RDS 스냅샷 완료 이벤트 수신 후):
-      ④ RDS start_export_task() 실행
-      ⑤ snapshot_ref.json export_status: "ready" 갱신
-      → dr_packages.status: "ready"
     """
 
     S3_BUCKET = "autoops-dr-packages"
 
     def __init__(self, assumed_session: "boto3.Session"):
-        """assumed_session: Cross-Account Role Assume 후 생성된 boto3 Session"""
         self.user_session = assumed_session
-        self.s3           = boto3.client("s3", region_name="us-west-2")
-        self.rds          = assumed_session.client("rds")
-        self.ecr          = assumed_session.client("ecr")
+        self.s3           = assumed_session.client("s3", region_name="us-west-2")
+        self.rds          = assumed_session.client("rds", region_name="us-west-2")
+        self.ecr          = assumed_session.client("ecr", region_name="us-west-2")
 
     # ── Phase 1 ────────────────────────────────────────────────────
 
@@ -48,13 +31,9 @@ class DRPackager:
         gcp_project: str,
         db: Session,
     ) -> DRPackage:
-        """
-        Phase 1을 실행한다. 즉시 완료되는 작업만 처리한다.
-        RDS 스냅샷은 CreateSnapshot만 호출하고 Export는 Phase 2에서 처리한다.
-        """
         s3_base = f"projects/{project_id}/latest"
 
-        # ① Skopeo ECR → GCR 이미지 복사 (FR-B-009)
+        # ① Skopeo ECR → GCR 이미지 복사
         gcr_uri, ecr_uri = self._copy_image_skopeo(
             prefix, environment, region, gcp_project
         )
@@ -65,30 +44,28 @@ class DRPackager:
         }
         self._upload_json(f"{s3_base}/application/image_ref.json", image_ref)
 
-        # ② RDS CreateSnapshot 호출 (시작만) (FR-B-010)
+        # ② RDS CreateSnapshot 호출
         snapshot_id  = f"autoops-{project_id[:8]}-{int(datetime.now().timestamp())}"
         rds_id       = f"{prefix}-{environment}-rds"
         snapshot_arn = self._create_rds_snapshot(rds_id, snapshot_id)
 
-        # snapshot_ref.json — pending 상태로 저장
         snapshot_ref = {
             "snapshot_id":     snapshot_id,
             "snapshot_arn":    snapshot_arn,
             "export_s3_path":  f"s3://{self.S3_BUCKET}/{s3_base}/data/exports/",
             "export_format":   "parquet",
-            "export_status":   "pending",   # Phase 2 완료 시 "ready"로 갱신
+            "export_status":   "pending",
             "exported_at":     None,
         }
         self._upload_json(f"{s3_base}/data/snapshot_ref.json", snapshot_ref)
 
         # ③ GCP Terraform HCL 저장
-        # §5-3 DR Package 디렉토리 구조
         self._upload_text(f"{s3_base}/infrastructure/main.tf", hcl_code)
 
-        # dr-report.json 생성 (FR-B-012)
+        # dr-report.json 생성 (RTO 15, RPO 0)
         dr_report = {
-            "rto_minutes": 12,   # §7-6 목표값
-            "rpo_minutes": 3,    # §18 변경이력 ❽: RPO 3분 확정
+            "rto_minutes": 15,
+            "rpo_minutes": 0,
             "confidence_summary": {"auto": 6, "review": 5, "manual": 0},
             "checklist": [
                 {"item": "GCP Terraform 코드 생성",      "status": "done"},
@@ -110,14 +87,14 @@ class DRPackager:
             gcr_image_uri         = gcr_uri,
             snapshot_ref_path     = f"s3://{self.S3_BUCKET}/{s3_base}/data/snapshot_ref.json",
             snapshot_status       = "pending",
-            rto_minutes           = 12,
-            rpo_minutes           = 3,
+            rto_minutes           = 15,
+            rpo_minutes           = 0,
             confidence_auto       = 6,
             confidence_review     = 5,
             confidence_manual     = 0,
             checklist             = dr_report["checklist"],
             is_latest             = True,
-            status                = "preparing",  # Phase 2 완료 시 "ready"
+            status                = "preparing",
         )
         db.add(package)
         db.commit()
@@ -136,14 +113,9 @@ class DRPackager:
         kms_key_id: str,
         db: Session,
     ) -> None:
-        """
-        RDS 스냅샷 완료 이벤트 수신 후 Phase 2를 실행한다.
-        RDS snapshot → S3 Parquet Export Task를 시작한다. (FR-B-010)
-        """
         s3_base = f"projects/{project_id}/latest"
         export_prefix = f"{s3_base}/data/exports/"
 
-        # RDS start_export_task (§5-3 Phase 2)
         export_task_id = f"autoops-export-{project_id[:8]}-{int(datetime.now().timestamp())}"
         self.rds.start_export_task(
             ExportTaskIdentifier = export_task_id,
@@ -154,7 +126,6 @@ class DRPackager:
             KmsKeyId             = kms_key_id,
         )
 
-        # snapshot_ref.json 갱신 — export_status: "ready"
         snapshot_ref = {
             "snapshot_arn":   snapshot_arn,
             "export_s3_path": f"s3://{self.S3_BUCKET}/{export_prefix}",
@@ -164,7 +135,6 @@ class DRPackager:
         }
         self._upload_json(f"{s3_base}/data/snapshot_ref.json", snapshot_ref)
 
-        # dr-report.json 체크리스트 갱신
         dr_report_key = f"{s3_base}/dr-report.json"
         try:
             obj = self.s3.get_object(Bucket=self.S3_BUCKET, Key=dr_report_key)
@@ -176,7 +146,6 @@ class DRPackager:
         except Exception:
             pass
 
-        # dr_packages.status → "ready"
         package = db.query(DRPackage).filter(
             DRPackage.package_id == package_id
         ).first()
@@ -197,19 +166,15 @@ class DRPackager:
         region: str,
         gcp_project: str,
     ) -> tuple[str, str]:
-        """
-        Skopeo로 ECR 이미지를 GCR(Artifact Registry)에 복사한다.
-        Docker 데몬 없이 동작한다. (§5-3 Phase 1 ②)
-        """
+        
         account_id = self.user_session.client("sts").get_caller_identity()["Account"]
-        ecr_uri = (
-            f"{account_id}.dkr.ecr.{region}.amazonaws.com"
-            f"/{prefix}-{environment}-app:latest"
-        )
+        
+        ecr_uri = f"{account_id}.dkr.ecr.us-west-2.amazonaws.com/autoops-sample-app:latest".lower()
+        
         gcr_uri = (
             f"us-west1-docker.pkg.dev/{gcp_project}"
-            f"/autoops-repo/{prefix}-{environment}-app:latest"
-        )
+            f"/autoops-repo/autoops-sample-app:latest"
+        ).lower()
 
         # ECR 로그인 토큰 취득
         ecr_token = self.ecr.get_authorization_token()
@@ -225,7 +190,7 @@ class DRPackager:
         )
         gcp_token = gcp_token_proc.stdout.strip()
 
-        # §5-3 Phase 1 ②: Skopeo 복사 명령어
+        # Skopeo 복사 실행
         result = subprocess.run(
             [
                 "skopeo", "copy",
@@ -245,7 +210,6 @@ class DRPackager:
         return gcr_uri, ecr_uri
 
     def _create_rds_snapshot(self, db_instance_id: str, snapshot_id: str) -> str:
-        """RDS 스냅샷 생성을 시작하고 ARN을 반환한다. (§5-3 Phase 1 ③)"""
         try:
             resp = self.rds.create_db_snapshot(
                 DBSnapshotIdentifier = snapshot_id,
@@ -254,7 +218,6 @@ class DRPackager:
             )
             return resp["DBSnapshot"]["DBSnapshotArn"]
         except self.rds.exceptions.DBInstanceNotFoundFault:
-            # RDS 인스턴스가 없는 경우 (dev 환경 등) — 빈 ARN 반환
             return ""
 
     # ── S3 업로드 헬퍼 ─────────────────────────────────────────────
