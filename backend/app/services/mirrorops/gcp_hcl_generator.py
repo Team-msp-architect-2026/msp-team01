@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -23,7 +24,6 @@ class GCPHCLGenerator:
         GCP Terraform HCL 전체를 생성하고 임시 디렉토리에 저장한다.
         반환: (full_hcl_code, work_dir)
         """
-        # §5-3 DR Package backend.tf: GCS State 버킷
         backend_hcl = f"""
 terraform{{
   required_providers{{
@@ -37,26 +37,37 @@ terraform{{
     prefix = "terraform/state"
 }}
 }}
-
 provider "google"{{
   project = "{gcp_project}"
   region  = "{settings.gcp_region}"
 }}
 """
 
-        # 모든 매핑 리소스 HCL 합치기
-        resource_hcl = "\n\n".join([
-            m.terraform_code for m in mappings
-            if m.terraform_code and not m.terraform_code.startswith("# 수동 매핑")
-        ])
+        # [추가] 중복 리소스 제거 후 HCL 조합
+        # detector.py에서 걸러지지 않은 모든 중복 케이스 최종 방어
+        seen_resources: set = set()
+        deduped_codes: list = []
 
-        full_hcl = backend_hcl + "\n\n" + resource_hcl
+        for m in mappings:
+            if not m.terraform_code or m.terraform_code.startswith("# 수동 매핑"):
+                continue
+            # terraform_code에서 resource type + name 추출해서 중복 체크
+            match = re.match(r'\s*resource\s+"([^"]+)"\s+"([^"]+)"', m.terraform_code)
+            if match:
+                key = (match.group(1), match.group(2))
+                if key in seen_resources:
+                    print(f"[GCPHCLGenerator] 중복 리소스 스킵: {key[0]} \"{key[1]}\"")
+                    continue
+                seen_resources.add(key)
+            deduped_codes.append(m.terraform_code)
+
+        resource_hcl = "\n\n".join(deduped_codes)
+        full_hcl     = backend_hcl + "\n\n" + resource_hcl
 
         # 임시 작업 디렉토리에 저장
         work_dir = tempfile.mkdtemp(prefix=f"autoops-dr-{project_id[:8]}-")
         main_tf  = Path(work_dir) / "main.tf"
         main_tf.write_text(full_hcl, encoding="utf-8")
-
         return full_hcl, work_dir
 
     def validate(self, work_dir: str) -> tuple[bool, str]:
@@ -70,7 +81,6 @@ provider "google"{{
         result = self._run_cmd(
             ["terraform", "validate", "-json"], work_dir
         )
-
         print(f"[GCPHCLGenerator] validate returncode: {result['returncode']}")
         print(f"[GCPHCLGenerator] validate stdout: {result['stdout'][:500]}")
         print(f"[GCPHCLGenerator] validate stderr: {result['stderr'][:500]}")
@@ -80,9 +90,9 @@ provider "google"{{
 
         import json
         try:
-            output = json.loads(result["stdout"])
+            output      = json.loads(result["stdout"])
             diagnostics = output.get("diagnostics", [])
-            error_msg = "\n".join([
+            error_msg   = "\n".join([
                 f"{d.get('severity', '')}: {d.get('summary', '')} — {d.get('detail', '')}"
                 for d in diagnostics
             ])
