@@ -571,6 +571,16 @@ def deployment_complete_callback(
             )
         except Exception as e:
             print(f"[경고] EventBridge 발행 실패: {e}")
+
+    elif body.status == "destroyed" and project:
+        # destroy 완료 → project status "destroy_completed" 전환
+        project.status = "destroy_completed"
+        db.commit()
+
+    elif body.status == "destroy_failed" and project:
+        # destroy 실패 → destroying → destroy_failed, project는 유지
+        db.commit()
+
     else:
         db.commit()
 
@@ -614,12 +624,34 @@ def deployment_action(
             detail={"code": "NOT_FOUND", "message": "배포 이력을 찾을 수 없습니다."},
         )
 
-    if deployment.status != "partial_failed":
+    # 이미 destroying 중이면 모든 액션 차단
+    if deployment.status == "destroying":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "LOCK_CONFLICT",
+                "message": "이미 리소스 삭제가 진행 중입니다.",
+            },
+        )
+
+    # full_destroy: completed / partial_failed / failed 모두 허용
+    # resume / fix_retry: partial_failed 만 허용
+    allowed_statuses = (
+        ["completed", "partial_failed", "failed", "destroy_failed"]
+        if body.action == "full_destroy"
+        else ["partial_failed"]
+    )
+
+    if deployment.status not in allowed_statuses:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "VALIDATION_ERROR",
-                "message": "partial_failed 상태의 배포에만 액션을 실행할 수 있습니다.",
+                "message": (
+                    "completed / partial_failed / failed 상태에서만 삭제할 수 있습니다."
+                    if body.action == "full_destroy"
+                    else "partial_failed 상태의 배포에만 액션을 실행할 수 있습니다."
+                ),
             },
         )
 
@@ -685,7 +717,8 @@ def deployment_action(
         )
 
     elif body.action == "full_destroy":
-        deployment.status = "deploying"
+        deployment.status        = "destroying"
+        deployment.error_message = None
         db.commit()
 
         runner.spawn_destroy_task(
