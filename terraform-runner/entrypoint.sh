@@ -29,7 +29,6 @@ send_callback() {
   if [ -z "${error_msg}" ]; then
     BODY="{\"status\": \"${status}\", \"project_id\": \"${PROJECT_ID}\"}"
   else
-    # error_msg 이스케이프 처리
     ESCAPED=$(echo "${error_msg}" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"오류 발생\"")
     BODY="{\"status\": \"${status}\", \"project_id\": \"${PROJECT_ID}\", \"error_message\": ${ESCAPED}}"
   fi
@@ -49,7 +48,7 @@ if [ $? -ne 0 ]; then
   send_callback "failed" "main.tf S3 다운로드 실패: ${HCL_S3_PATH}"
   exit 1
 fi
-echo "[AutoOps Runner] main.tf 다운로드 완료:${HCL_S3_PATH}"
+echo "[AutoOps Runner] main.tf 다운로드 완료: ${HCL_S3_PATH}"
 
 cd /workspace/tf
 
@@ -79,7 +78,12 @@ echo "[AutoOps Runner] Cross-Account Role Assume 완료"
 terraform init -input=false
 if [ $? -ne 0 ]; then
   echo "[AutoOps Runner] terraform init 실패"
-  send_callback "failed" "terraform init 실패"
+  # apply 실패 → partial_failed / destroy 실패 → destroy_failed
+  if [ "${ACTION}" = "destroy" ]; then
+    send_callback "destroy_failed" "terraform init 실패 (destroy)"
+  else
+    send_callback "failed" "terraform init 실패"
+  fi
   exit 1
 fi
 echo "[AutoOps Runner] terraform init 완료"
@@ -90,17 +94,18 @@ if [ "${ACTION}" = "destroy" ]; then
   TF_EXIT=$?
   if [ $TF_EXIT -ne 0 ]; then
     echo "[AutoOps Runner] terraform destroy 실패"
-    send_callback "partial_failed" "terraform destroy 실패"
+    send_callback "destroy_failed" "terraform destroy 실패 (exit code: ${TF_EXIT})"
     exit 1
   fi
   echo "[AutoOps Runner] terraform destroy 완료"
   send_callback "destroyed" ""
+
 else
   terraform apply -auto-approve -input=false
   TF_EXIT=$?
   if [ $TF_EXIT -ne 0 ]; then
     echo "[AutoOps Runner] terraform apply 실패"
-    send_callback "partial_failed" "terraform apply 실패"
+    send_callback "partial_failed" "terraform apply 실패 (exit code: ${TF_EXIT})"
     exit 1
   fi
   echo "[AutoOps Runner] terraform apply 완료"
