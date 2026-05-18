@@ -1,5 +1,5 @@
 # backend/app/api/projects.py
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -109,7 +109,7 @@ class DeleteProjectRequest(BaseModel):
 @router.delete("/{project_id}")
 def delete_project(
     project_id: str,
-    request: DeleteProjectRequest,
+    request: DeleteProjectRequest = Body(default=DeleteProjectRequest()),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
