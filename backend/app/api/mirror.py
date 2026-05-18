@@ -80,6 +80,7 @@ def get_resources(
         ).order_by(GCPMapping.created_at.desc()).first()
 
         result.append({
+            "resource_id":       res.resource_id, 
             "aws_resource_type": res.resource_type,
             "aws_resource_name": res.resource_name,
             "aws_resource_id":   res.resource_id_aws,
@@ -88,6 +89,7 @@ def get_resources(
             "confidence":        mapping.confidence        if mapping else "manual",
             "review_reason":     mapping.review_reason     if mapping else None,
             "user_confirmed":    mapping.user_confirmed    if mapping else False,
+            "terraform_code":    mapping.terraform_code    if mapping else None,
         })
 
     return {"success": True, "data": result}
@@ -327,13 +329,26 @@ def failover(
     db.add(fh)
     db.commit()
 
-    # simulation 실행 연결
     if body.mode == "simulation" and sim_package:
+        # [수정] S3 경로에서 실제 HCL 파일 내용을 읽어서 전달
+        hcl_content = ""
+        s3_path = sim_package.terraform_code_path or ""
+        if s3_path.startswith("s3://"):
+            try:
+                import boto3 as _boto3
+                path_body  = s3_path.replace("s3://", "")
+                bucket, key = path_body.split("/", 1)
+                s3_client   = _boto3.client("s3", region_name="us-west-2")
+                obj         = s3_client.get_object(Bucket=bucket, Key=key)
+                hcl_content = obj["Body"].read().decode("utf-8")
+            except Exception as e:
+                print(f"[Failover] HCL 파일 읽기 실패: {e}")
+
         background_tasks.add_task(
             _run_failover_simulation,
             project_id  = project_id,
             failover_id = failover_id,
-            hcl_code    = sim_package.terraform_code_path or "",
+            hcl_code    = hcl_content,
             db          = SessionLocal(),
         )
 
@@ -354,29 +369,78 @@ def _run_failover_simulation(
     hcl_code: str,
     db: Session,
 ) -> None:
+    import json as _json
+
     work_dir = tempfile.mkdtemp(prefix=f"autoops-failover-{project_id[:8]}-")
     try:
         (Path(work_dir) / "main.tf").write_text(hcl_code, encoding="utf-8")
+
         subprocess.run(
             ["terraform", "init", "-backend=false"],
-            cwd=work_dir, capture_output=True
+            cwd=work_dir, capture_output=True,
         )
-        subprocess.run(
+
+        plan_result = subprocess.run(
             ["terraform", "plan", "-json"],
-            cwd=work_dir, capture_output=True, text=True
+            cwd=work_dir, capture_output=True, text=True,
         )
-        add_count = 11
+
+        # [수정] terraform plan -json 파싱 → 실제 생성될 리소스 수 추출
+        # terraform plan -json은 NDJSON 형식으로 여러 줄 출력
+        # "change_summary" 타입의 라인에서 add 수를 읽음
+        add_count = 0
+        for line in plan_result.stdout.splitlines():
+            try:
+                obj = _json.loads(line)
+                if obj.get("type") == "change_summary":
+                    add_count = obj.get("changes", {}).get("add", 0)
+                    break
+            except _json.JSONDecodeError:
+                continue
 
         fh = db.query(FailoverHistory).filter(
             FailoverHistory.failover_id == failover_id
         ).first()
         if fh:
-            fh.status              = "completed"
-            fh.gcp_resources_created = add_count
-            fh.actual_rto_seconds  = 12 * 60
-            fh.completed_at = __import__("datetime").datetime.utcnow()
+            fh.status                = "completed"
+            fh.gcp_resources_created = add_count if add_count > 0 else None
+            fh.actual_rto_seconds    = 15 * 60   # [수정] 12분 → 15분
+            fh.completed_at          = __import__("datetime").datetime.utcnow()
             db.commit()
+
     finally:
         import shutil
         shutil.rmtree(work_dir, ignore_errors=True)
         db.close()
+
+# 신규 엔드포인트 추가
+from pydantic import BaseModel as _BaseModel
+
+class TerraformCodeUpdate(_BaseModel):
+    terraform_code: str
+
+@router.patch("/{project_id}/resources/{resource_id}/terraform-code")
+def update_terraform_code(
+    project_id: str,
+    resource_id: str,
+    body: TerraformCodeUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_project_or_404(project_id, current_user.user_id, db)
+
+    mapping = db.query(GCPMapping).filter(
+        GCPMapping.resource_id == resource_id,
+        GCPMapping.project_id  == project_id,
+    ).first()
+
+    if not mapping:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "매핑을 찾을 수 없습니다."},
+        )
+
+    mapping.terraform_code = body.terraform_code
+    db.commit()
+
+    return {"success": True, "data": {"resource_id": resource_id}}

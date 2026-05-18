@@ -11,11 +11,19 @@ from app.services.mirrorops.sqs_worker import start_sqs_worker
 from app.core.config import settings
 
 @asynccontextmanager
-async def lifespan(app):
-    task = asyncio.create_task(start_sqs_worker())
-    yield
-    task.cancel()
-
+async def lifespan(app: FastAPI):
+    # 서버 켜질 때 SQS 워커를 백그라운드 태스크로 실행
+    worker_task = asyncio.create_task(start_sqs_worker())
+    print("✅ MirrorOps SQS 워커 백그라운드 실행 시작")
+    
+    yield # API 서버 동작 중...
+    
+    # 서버 꺼질 때 워커 종료 처리
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        print("🛑 MirrorOps SQS 워커 종료 완료")
 
 app = FastAPI(
     title="AutoOps API",

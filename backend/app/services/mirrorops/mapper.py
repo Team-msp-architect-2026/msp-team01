@@ -1,8 +1,18 @@
 import json
 
-# §5-2 AWS→GCP 매핑 테이블 (매핑 방식 + confidence)
+# GCP에 대응 개념이 없어 매핑이 불필요한 리소스 타입
+NOT_REQUIRED_RESOURCES = {
+    "AWS::EC2::InternetGateway",
+    "AWS::ElasticLoadBalancingV2::TargetGroup",
+    "AWS::ECS::Cluster",
+    "AWS::ECS::TaskDefinition",
+    "AWS::RDS::DBSubnetGroup",
+    "AWS::Logs::LogGroup",
+    "AWS::KMS::Key",
+}
+
+# §5-2 AWS→GCP 매핑 테이블
 RULE_BASED_MAP: dict[str, dict] = {
-    # 룰 기반 (confidence: auto) — 6개 카테고리
     "AWS::EC2::VPC": {
         "gcp_type":   "google_compute_network",
         "confidence": "auto",
@@ -25,7 +35,6 @@ RULE_BASED_MAP: dict[str, dict] = {
             ).lower().replace("_", "-"),
             "ip_cidr_range": cfg.get("cidrBlock", ""),
             "region":        "us-west1",
-            # [수정] GCP 서브넷 생성 시 network는 필수 인자입니다.
             "network":       cfg.get("vpcId", "default-vpc").lower().replace("_", "-"),
         },
     },
@@ -37,7 +46,7 @@ RULE_BASED_MAP: dict[str, dict] = {
                 (cfg.get("tags") or {}).get("Name", "") or
                 "router-" + cfg.get("routeTableId", "default")
             ).lower().replace("_", "-"),
-            "region": "us-west1",
+            "region":  "us-west1",
             "network": cfg.get("vpcId", "default-vpc").lower().replace("_", "-"),
         },
     },
@@ -75,7 +84,6 @@ RULE_BASED_MAP: dict[str, dict] = {
             "display_name": cfg.get("RoleName", ""),
         },
     },
-    # Bedrock 보완 대상 (confidence: review) — 3개 카테고리
     "AWS::EC2::SecurityGroup": {
         "gcp_type":   "google_compute_firewall",
         "confidence": "review",
@@ -93,7 +101,6 @@ RULE_BASED_MAP: dict[str, dict] = {
     },
 }
 
-# §5-2 IAM Action → GCP Role 변환 테이블
 IAM_ACTION_TO_GCP_ROLE: dict[str, str] = {
     "s3:GetObject":             "roles/storage.objectAdmin",
     "s3:PutObject":             "roles/storage.objectAdmin",
@@ -110,11 +117,6 @@ from app.services.mirrorops.bedrock_client import BedrockMapper
 
 
 class MappingEngine:
-    """
-    AWS 리소스 목록을 GCP 리소스로 매핑한다.
-    - 룰 기반: confidence=auto (6개 카테고리)
-    - Bedrock 보완: confidence=review (3개 카테고리)
-    """
 
     def __init__(self):
         self.bedrock = BedrockMapper()
@@ -129,22 +131,23 @@ class MappingEngine:
         mappings = []
 
         for res in aws_resources:
-            # [수정 1] config_json이 list인 경우 dict로 정규화
-            # AWS Config에서 일부 리소스가 list 형태로 반환되는 케이스 방어
             config_json = res.config_json or {}
             if isinstance(config_json, list):
                 config_json = config_json[0] if config_json else {}
 
             rule = RULE_BASED_MAP.get(res.resource_type)
             if not rule:
-                mapping = self._create_manual_mapping(res, project_id, sync_id)
+                # GCP 매핑 불필요 리소스와 수동 설정 리소스 구분
+                if res.resource_type in NOT_REQUIRED_RESOURCES:
+                    mapping = self._create_not_required_mapping(res, project_id, sync_id)
+                else:
+                    mapping = self._create_manual_mapping(res, project_id, sync_id)
                 db.add(mapping)
                 mappings.append(mapping)
                 continue
 
             if rule["confidence"] == "auto" and rule["mapping"]:
-                # 룰 기반 변환 (FR-B-004)
-                attrs = rule["mapping"](config_json)  # 정규화된 config_json 사용
+                attrs = rule["mapping"](config_json)
                 hcl   = self._attrs_to_hcl(rule["gcp_type"], res.resource_name, attrs)
                 mapping = GCPMapping(
                     resource_id       = res.resource_id,
@@ -158,14 +161,11 @@ class MappingEngine:
                     user_confirmed    = False,
                 )
             else:
-                # Bedrock 보완 변환 (FR-B-005)
                 result = self.bedrock.map_resource(
                     resource_type = res.resource_type,
-                    aws_config    = config_json,      # 정규화된 config_json 사용
+                    aws_config    = config_json,
                     gcp_type      = rule["gcp_type"],
                 )
-
-                # [수정 2] result 또는 mapping_info가 list인 경우 방어
                 if isinstance(result, list):
                     result = result[0] if result else {}
 
@@ -174,7 +174,6 @@ class MappingEngine:
                     mapping_info = mapping_info[0] if mapping_info else {}
 
                 review_reason = result.get("review_reason", "")
-
                 hcl = self._generate_hcl_from_mapping_info(
                     gcp_type     = rule["gcp_type"],
                     name         = res.resource_name,
@@ -201,9 +200,36 @@ class MappingEngine:
         db.commit()
         return mappings
 
-    # ──────────────────────────────────────────────────────────
-    # review 리소스용 HCL 템플릿 함수들
-    # ──────────────────────────────────────────────────────────
+    def _create_not_required_mapping(
+        self, res: AWSResource, project_id: str, sync_id: str
+    ) -> GCPMapping:
+        """GCP에 대응 개념이 없어 별도 생성이 불필요한 리소스"""
+        return GCPMapping(
+            resource_id       = res.resource_id,
+            project_id        = project_id,
+            sync_id           = sync_id,
+            gcp_resource_type = "not_required",
+            gcp_resource_name = res.resource_name,
+            terraform_code    = f"# GCP 매핑 불필요: {res.resource_type}",
+            confidence        = "not_required",
+            review_reason     = "GCP에 동일한 개념의 리소스가 없어 별도 생성이 필요하지 않습니다.",
+            user_confirmed    = False,
+        )
+
+    def _create_manual_mapping(
+        self, res: AWSResource, project_id: str, sync_id: str
+    ) -> GCPMapping:
+        return GCPMapping(
+            resource_id       = res.resource_id,
+            project_id        = project_id,
+            sync_id           = sync_id,
+            gcp_resource_type = "unknown",
+            gcp_resource_name = res.resource_name,
+            terraform_code    = f"# 수동 매핑 필요: {res.resource_type}",
+            confidence        = "manual",
+            review_reason     = "자동 변환 규칙이 없습니다. 수동으로 GCP 리소스를 설정하세요.",
+            user_confirmed    = False,
+        )
 
     def _generate_hcl_from_mapping_info(
         self, gcp_type: str, name: str, mapping_info: dict
@@ -214,17 +240,14 @@ class MappingEngine:
             return self._generate_backend_service_hcl(name, mapping_info)
         elif gcp_type == "google_cloud_run_service":
             return self._generate_cloud_run_hcl(name, mapping_info)
-        else:
-            return f'# review 필요: {gcp_type} — {name}'
+        return f'# review 필요: {gcp_type} — {name}'
 
     def _generate_firewall_hcl(self, name: str, info: dict) -> str:
-        # [수정] GCP 리소스명 정규식 통과를 위해 소문자 및 하이픈으로 강제 변환
         gcp_name  = name.lower().replace("_", "-")
         tf_name   = gcp_name.replace("-", "_")
         direction = info.get("direction", "INGRESS")
         rules     = info.get("rules", [{"protocol": "all", "source_ranges": ["0.0.0.0/0"]}])
 
-        # [수정] VPC 이름 동적 추론 (예: DD-prod-sg-db -> dd-prod-vpc)
         name_parts = name.split("-")
         vpc_name = "default"
         if len(name_parts) >= 2:
@@ -259,7 +282,6 @@ class MappingEngine:
 }}'''
 
     def _generate_backend_service_hcl(self, name: str, info: dict) -> str:
-        # [수정] 대문자 에러 방지용 소문자 변환
         gcp_name              = name.lower().replace("_", "-")
         tf_name               = gcp_name.replace("-", "_")
         protocol              = info.get("protocol", "HTTP")
@@ -274,7 +296,6 @@ class MappingEngine:
 }}'''
 
     def _generate_cloud_run_hcl(self, name: str, info: dict) -> str:
-        # [수정] 대문자 에러 방지용 소문자 변환
         gcp_name = name.lower().replace("_", "-")
         tf_name  = gcp_name.replace("-", "_")
         image    = info.get("image", "gcr.io/cloudrun/hello")
@@ -314,14 +335,7 @@ class MappingEngine:
   }}
 }}'''
 
-    # ──────────────────────────────────────────────────────────
-    # 기존 메서드들 (auto 리소스용)
-    # ──────────────────────────────────────────────────────────
-
-    def _apply_iam_mapping(
-        self, mapping: GCPMapping, res: AWSResource
-    ) -> GCPMapping:
-        # [수정 3] config_json이 list인 경우 dict로 정규화
+    def _apply_iam_mapping(self, mapping: GCPMapping, res: AWSResource) -> GCPMapping:
         config = res.config_json or {}
         if isinstance(config, list):
             config = config[0] if config else {}
@@ -347,26 +361,7 @@ class MappingEngine:
 
         return mapping
 
-    def _create_manual_mapping(
-        self, res: AWSResource, project_id: str, sync_id: str
-    ) -> GCPMapping:
-        return GCPMapping(
-            resource_id       = res.resource_id,
-            project_id        = project_id,
-            sync_id           = sync_id,
-            gcp_resource_type = "unknown",
-            gcp_resource_name = res.resource_name,
-            terraform_code    = f"# 수동 매핑 필요: {res.resource_type}",
-            confidence        = "manual",
-            review_reason     = "자동 변환 규칙이 없습니다. 수동으로 GCP 리소스를 설정하세요.",
-            user_confirmed    = False,
-        )
-
-    def _attrs_to_hcl(
-        self, gcp_type: str, name: str, attrs: dict
-    ) -> str:
-        """auto 리소스(룰 기반) 전용"""
-
+    def _attrs_to_hcl(self, gcp_type: str, name: str, attrs: dict) -> str:
         MAP_TYPE_KEYS = {"labels", "annotations", "limits", "requests", "metadata"}
 
         def dict_to_hcl(d: dict, indent: int = 2) -> str:
@@ -398,8 +393,7 @@ class MappingEngine:
                             lines.append(dict_to_hcl(item, indent + 2))
                             lines.append(f"{pad}}}")
                     else:
-                        formatted = json.dumps(v)
-                        lines.append(f'{pad}{k} = {formatted}')
+                        lines.append(f'{pad}{k} = {json.dumps(v)}')
                 elif isinstance(v, bool):
                     lines.append(f'{pad}{k} = {str(v).lower()}')
                 elif isinstance(v, (int, float)):
@@ -408,7 +402,6 @@ class MappingEngine:
                     lines.append(f'{pad}{k} = "{v}"')
             return "\n".join(lines)
 
-        # [수정] TF 리소스 이름도 일관성을 위해 소문자화 (GCP 권장 컨벤션)
         resource_name = name.lower().replace("-", "_")
         body = dict_to_hcl(attrs)
         return f'resource "{gcp_type}" "{resource_name}" {{\n{body}\n}}'

@@ -125,7 +125,7 @@ async def _handle_rds_snapshot_completed(detail: dict):
             package_id      = package.package_id,
             snapshot_arn    = snapshot_arn,
             export_role_arn = f"arn:aws:iam::{account.aws_account_id}:role/AutoOpsRDSExportRole",
-            kms_key_id      = "alias/aws/rds",
+            kms_key_id      = "alias/autoops-rds-export",
             db              = db,
         )
 
