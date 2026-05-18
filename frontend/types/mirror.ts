@@ -16,9 +16,10 @@ export interface DRStatus {
 }
 
 // §7-6 GET /api/mirror/{id}/resources 응답 항목
-export type Confidence = 'auto' | 'review' | 'manual'
+export type Confidence = 'auto' | 'review' | 'manual' | 'not_required'
 
 export interface ResourceMapping {
+  resource_id:       string
   aws_resource_type: string
   aws_resource_name: string
   aws_resource_id: string
@@ -27,6 +28,7 @@ export interface ResourceMapping {
   confidence: Confidence
   review_reason: string | null
   user_confirmed: boolean
+  terraform_code:    string | null
 }
 
 // §7-6 GET /api/mirror/{id}/package 응답

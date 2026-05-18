@@ -33,3 +33,4 @@ build/
 .DS_Store
 Thumbs.db 
 session-manager-plugin.deb
+response.json

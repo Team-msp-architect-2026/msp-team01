@@ -1,4 +1,3 @@
-// frontend/app/projects/[id]/failover/page.tsx
 'use client'
 
 import { useState, useEffect } from 'react'
@@ -9,15 +8,6 @@ import { useDRPackage } from '@/hooks/useMirrorOps'
 import { FailoverResponse } from '@/types/mirror'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-
-const SIMULATION_STEPS = [
-  { label: 'Terraform Init',         duration: '2초' },
-  { label: 'Terraform Plan',         duration: 'GCP 11개' },
-  { label: 'Terraform Apply',        duration: '시뮬레이션' },
-  { label: 'Cloud SQL 복원 예상',     duration: '3분 20초' },
-  { label: 'Cloud Run 배포 예상',     duration: '2분 10초' },
-  { label: 'Load Balancer 헬스체크',  duration: '시뮬레이션' },
-]
 
 export default function FailoverPage() {
   const params = useParams()
@@ -35,9 +25,22 @@ export default function FailoverPage() {
   const { data: packageData } = useDRPackage(projectId)
   const latest = packageData?.latest
 
+  // SIMULATION_STEPS를 컴포넌트 내부로 이동 — latest 참조 가능
+  const SIMULATION_STEPS = [
+    { label: 'Terraform Init',        duration: '2초' },
+    { label: 'Terraform Plan',        duration: `GCP ${
+        latest?.dr_report?.confidence_summary
+          ? (latest.dr_report.confidence_summary.auto + latest.dr_report.confidence_summary.review)
+          : 19
+      }개` },
+    { label: 'Terraform Apply',       duration: '시뮬레이션' },
+    { label: 'Cloud SQL 복원 예상',    duration: '3분 20초' },
+    { label: 'Cloud Run 배포 예상',    duration: '2분 10초' },
+    { label: 'Load Balancer 헬스체크', duration: '시뮬레이션' },
+  ]
+
   const { events } = useWebSocket(
     failoverData ? projectId : null,
-    // [FIX] fo_ 접두사 제거
     failoverData ? failoverData.failover_id : null
   )
 
@@ -45,7 +48,6 @@ export default function FailoverPage() {
   useEffect(() => {
     if (!isRunning || mode !== 'simulation') return
 
-    // [FIX] 마지막 단계에서 isRunning false 전환
     if (simStep >= SIMULATION_STEPS.length - 1) {
       setIsRunning(false)
       return
@@ -225,10 +227,12 @@ export default function FailoverPage() {
               </div>
             ))}
 
-            {/* [FIX] isRunning=false + 마지막 단계 = 완료 표시 */}
+            {/* 완료 표시 — DB의 rto_minutes 사용 */}
             {!isRunning && simStep >= SIMULATION_STEPS.length - 1 && (
               <div className="pt-3 border-t border-white/8">
-                <p className="text-emerald-400 font-semibold">총 예상 RTO: 약 12분</p>
+                <p className="text-emerald-400 font-semibold">
+                  총 예상 RTO: 약 {latest?.dr_report?.rto_minutes ?? 15}분
+                </p>
               </div>
             )}
           </div>
@@ -253,7 +257,7 @@ export default function FailoverPage() {
         </div>
       )}
 
-      {/* [FIX] 완료 후 다시 시뮬레이션 버튼 */}
+      {/* 완료 후 다시 시뮬레이션 버튼 */}
       {!isRunning && simStep >= SIMULATION_STEPS.length - 1 && (
         <Button
           variant="outline"

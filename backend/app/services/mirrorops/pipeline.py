@@ -151,6 +151,29 @@ class MirrorOpsPipelineService:
             else:
                 # 변경 없음 → DR Package 재생성 스킵
                 print(f"[MirrorOps] 변경 없음 — DR Package 재생성 스킵 (project_id={project_id})")
+                
+                # [추가] 변경 없음: 최신 패키지가 ready면 dr_status 복원
+                latest_pkg = db.query(DRPackageModel).filter(
+                    DRPackageModel.project_id == project_id,
+                    DRPackageModel.is_latest  == True,
+                ).first()
+                if latest_pkg and latest_pkg.status == "ready":
+                    project.dr_status = "ready"
+                    # [추가] 스냅샷 Export 완료 시 체크리스트도 동기화
+                    if latest_pkg.snapshot_status == "ready" and latest_pkg.checklist:
+                        updated = []
+                        for item in latest_pkg.checklist:
+                            if item.get("item") == "RDS 스냅샷 Export":
+                                updated.append({"item": item["item"], "status": "done"})
+                            else:
+                                updated.append(item)
+                        latest_pkg.checklist = updated
+                db.commit()
+
+            # [추가] Phase 1 완료 → sync 상태 업데이트
+            sync.status       = "completed"
+            sync.completed_at = datetime.utcnow()
+            db.commit()
 
         except Exception as e:
             sync.status        = "failed"

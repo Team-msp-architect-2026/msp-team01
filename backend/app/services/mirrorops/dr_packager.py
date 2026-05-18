@@ -115,6 +115,15 @@ class DRPackager:
     ) -> None:
         s3_base = f"projects/{project_id}/latest"
         export_prefix = f"{s3_base}/data/exports/"
+        # [추가] 스냅샷 available 상태 대기 (최대 20분)
+        snapshot_id = snapshot_arn.split(":")[-1]
+        print(f"[DRPackager] 스냅샷 완료 대기 중: {snapshot_id}")
+        waiter = self.rds.get_waiter("db_snapshot_available")
+        waiter.wait(
+            DBSnapshotIdentifier = snapshot_id,
+            WaiterConfig         = {"Delay": 30, "MaxAttempts": 40},
+        )
+        print(f"[DRPackager] 스냅샷 사용 가능 — Export 시작")
 
         export_task_id = f"autoops-export-{project_id[:8]}-{int(datetime.now().timestamp())}"
         self.rds.start_export_task(
@@ -155,59 +164,87 @@ class DRPackager:
             package.snapshot_export_s3_path = (
                 f"s3://{self.S3_BUCKET}/{export_prefix}"
             )
+            # [추가] DB 체크리스트 업데이트 (S3 dr-report.json과 동기화)
+            updated_checklist = []
+            for item in (package.checklist or []):
+                if item.get("item") == "RDS 스냅샷 Export":
+                    updated_checklist.append({
+                        "item":   item["item"],
+                        "status": "done",
+                    })
+                else:
+                    updated_checklist.append(item)
+            package.checklist = updated_checklist
             db.commit()
 
     # ── Skopeo 이미지 복사 (FR-B-009) ──────────────────────────────
 
     def _copy_image_skopeo(
-        self,
-        prefix: str,
-        environment: str,
-        region: str,
-        gcp_project: str,
-    ) -> tuple[str, str]:
-        
-        account_id = self.user_session.client("sts").get_caller_identity()["Account"]
-        
-        ecr_uri = f"{account_id}.dkr.ecr.us-west-2.amazonaws.com/autoops-sample-app:latest".lower()
-        
-        gcr_uri = (
-            f"us-west1-docker.pkg.dev/{gcp_project}"
-            f"/autoops-repo/autoops-sample-app:latest"
-        ).lower()
+            self,
+            prefix: str,
+            environment: str,
+            region: str,
+            gcp_project: str,
+        ) -> tuple[str, str]:
+            import base64
+            import os
 
-        # ECR 로그인 토큰 취득
-        ecr_token = self.ecr.get_authorization_token()
-        token_data = ecr_token["authorizationData"][0]
-        import base64
-        ecr_creds  = base64.b64decode(token_data["authorizationToken"]).decode()
-        ecr_user, ecr_pass = ecr_creds.split(":", 1)
+            account_id = self.user_session.client("sts").get_caller_identity()["Account"]
 
-        # GCP 액세스 토큰 취득
-        gcp_token_proc = subprocess.run(
-            ["gcloud", "auth", "print-access-token"],
-            capture_output=True, text=True,
-        )
-        gcp_token = gcp_token_proc.stdout.strip()
+            ecr_uri = f"{account_id}.dkr.ecr.us-west-2.amazonaws.com/autoops-sample-app:latest".lower()
+            gcr_uri = (
+                f"us-west1-docker.pkg.dev/{gcp_project}"
+                f"/autoops-repo/autoops-sample-app:latest"
+            ).lower()
 
-        # Skopeo 복사 실행
-        result = subprocess.run(
-            [
-                "skopeo", "copy",
-                "--src-creds",  f"{ecr_user}:{ecr_pass}",
-                "--dest-creds", f"oauth2accesstoken:{gcp_token}",
-                f"docker://{ecr_uri}",
-                f"docker://{gcr_uri}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+            # ECR 로그인 토큰 취득
+            ecr_token = self.ecr.get_authorization_token()
+            token_data = ecr_token["authorizationData"][0]
+            ecr_creds  = base64.b64decode(token_data["authorizationToken"]).decode()
+            ecr_user, ecr_pass = ecr_creds.split(":", 1)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"Skopeo 복사 실패:{result.stderr}")
+            # [수정] gcloud 서비스 계정 인증 후 액세스 토큰 취득
+            # GOOGLE_APPLICATION_CREDENTIALS만 설정하면 gcloud가 인식 못함
+            # → activate-service-account로 명시적 인증 필요
+            key_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+            if key_path:
+                activate_result = subprocess.run(
+                    ["gcloud", "auth", "activate-service-account",
+                    "--key-file", key_path],
+                    capture_output=True, text=True,
+                )
+                if activate_result.returncode != 0:
+                    raise RuntimeError(
+                        f"GCP 서비스 계정 인증 실패: {activate_result.stderr}"
+                    )
 
-        return gcr_uri, ecr_uri
+            gcp_token_proc = subprocess.run(
+                ["gcloud", "auth", "print-access-token"],
+                capture_output=True, text=True,
+            )
+            gcp_token = gcp_token_proc.stdout.strip()
+
+            if not gcp_token:
+                raise RuntimeError("GCP 액세스 토큰 취득 실패 — gcloud 인증 상태 확인 필요")
+
+            # Skopeo 복사 실행
+            result = subprocess.run(
+                [
+                    "skopeo", "copy",
+                    "--src-creds",  f"{ecr_user}:{ecr_pass}",
+                    "--dest-creds", f"oauth2accesstoken:{gcp_token}",
+                    f"docker://{ecr_uri}",
+                    f"docker://{gcr_uri}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Skopeo 복사 실패:{result.stderr}")
+
+            return gcr_uri, ecr_uri
 
     def _create_rds_snapshot(self, db_instance_id: str, snapshot_id: str) -> str:
         try:
