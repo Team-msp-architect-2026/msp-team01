@@ -21,12 +21,21 @@ export default function DeployPage() {
 
   const [deploymentId, setDeploymentId] = useState<string | null>(null)
   const [isDeploying, setIsDeploying] = useState(false)
+  const [projectName, setProjectName] = useState<string>('')        // ← 추가
   const [deployStatus, setDeployStatus] = useState<
     'idle' | 'deploying' | 'completed' | 'failed'
   >('idle')
   const [logs, setLogs] = useState<LogEntry[]>([])
 
   const { events, isConnected } = useWebSocket(projectId, deploymentId)
+
+  // 프로젝트 이름 미리 조회 (토스트용)                              // ← 추가
+  useEffect(() => {
+    if (!projectId) return
+    apiClient.get(`/api/projects/${projectId}`)
+      .then((res) => setProjectName(res.data.data?.name ?? ''))
+      .catch(() => {})
+  }, [projectId])
 
   // WebSocket 이벤트 처리 — §7-7
   useEffect(() => {
@@ -45,8 +54,12 @@ export default function DeployPage() {
 
     if (latest.event_type === 'deploy_completed') {
       setDeployStatus('completed')
-      // §12-9: 배포 완료 → SCR-B-01 DR 대시보드 이동
-      setTimeout(() => router.push(`/projects/${projectId}/mirror`), 2000)
+      // 대시보드 토스트 데이터 저장 후 이동                          // ← 수정
+      localStorage.setItem('deploy_toast', JSON.stringify({
+        projectName: projectName || projectId,
+        message: '배포가 완료되었습니다.',
+      }))
+      setTimeout(() => router.push('/dashboard'), 2000)
     }
 
     if (latest.event_type === 'deploy_failed') {
@@ -57,7 +70,7 @@ export default function DeployPage() {
         1000
       )
     }
-  }, [events, projectId, router])
+  }, [events, projectId, projectName, router])
 
   const handleDeploy = async () => {
     setIsDeploying(true)
@@ -134,10 +147,17 @@ export default function DeployPage() {
         <Card className="border-green-500 bg-green-50">
           <CardContent className="p-4">
             <p className="text-green-700 font-medium">
-              ✅ 배포 완료. MirrorOps가 자동으로 시작됩니다.
+              ✅ 배포 완료. 대시보드로 이동 중...
             </p>
-            <p className="text-sm text-green-600 mt-1">
-              DR 대시보드로 이동 중...
+          </CardContent>
+        </Card>
+      )}
+
+      {deployStatus === 'failed' && (
+        <Card className="border-red-500 bg-red-50">
+          <CardContent className="p-4">
+            <p className="text-red-700 font-medium">
+              ❌ 배포 실패. Partial Failure 페이지로 이동 중...
             </p>
           </CardContent>
         </Card>

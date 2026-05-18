@@ -30,7 +30,7 @@ export interface AWSAccount {
 }
 
 // 프로젝트
-export type ProjectStatus = 'created' | 'deploying' | 'completed' | 'failed' | 'partial_failed'
+export type ProjectStatus = 'created' | 'deploying' | 'completed' | 'failed' | 'partial_failed' | 'destroying' | 'destroy_completed' | 'destroy_failed'
 export type DRStatusValue = 'not_ready' | 'syncing' | 'ready'
 export type Environment = 'prod' | 'staging' | 'dev'
 
@@ -48,7 +48,7 @@ export interface Project {
 }
 
 // Deployment
-export type DeploymentStatus = 'created' | 'deploying' | 'completed' | 'failed' | 'partial_failed'
+export type DeploymentStatus = 'created' | 'deploying' | 'completed' | 'failed' | 'partial_failed' | 'destroying' | 'destroyed' | 'destroy_failed'
 
 export interface Deployment {
   deployment_id: string

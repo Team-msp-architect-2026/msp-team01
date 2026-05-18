@@ -573,9 +573,16 @@ def deployment_complete_callback(
             print(f"[경고] EventBridge 발행 실패: {e}")
 
     elif body.status == "destroyed" and project:
-        # destroy 완료 → project status "destroy_completed" 전환
-        project.status = "destroy_completed"
-        db.commit()
+        # destroy 완료 →
+        # delete_project_records로 DB 전체 삭제 (AWS 리소스 삭제 체크 후 삭제 요청한 경우)
+        # projects.py의 _delete_project_records 재사용
+        try:
+            from app.api.projects import _delete_project_records
+            _delete_project_records(body.project_id, project, db)
+        except Exception:
+            # 혹시 이미 삭제된 경우 등 — project status만 destroy_completed로 마킹
+            project.status = "destroy_completed"
+            db.commit()
 
     elif body.status == "destroy_failed" and project:
         # destroy 실패 → destroying → destroy_failed, project는 유지
