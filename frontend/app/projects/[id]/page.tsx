@@ -7,11 +7,14 @@ import { apiClient } from '@/lib/api'
 import { Project } from '@/types'
 
 const STATUS_CONFIG: Record<string, { text: string; color: string }> = {
-  completed:      { text: '✅ 배포 완료',  color: 'text-emerald-400' },
-  deploying:      { text: '⏳ 배포 중',    color: 'text-blue-400' },
-  failed:         { text: '❌ 배포 실패',  color: 'text-red-400' },
-  partial_failed: { text: '⚠️ 부분 실패', color: 'text-yellow-400' },
-  created:        { text: '🔧 준비 중',    color: 'text-[#9ca3af]' },
+  completed:         { text: '✅ 배포 완료',  color: 'text-emerald-400' },
+  deploying:         { text: '⏳ 배포 중',    color: 'text-blue-400' },
+  failed:            { text: '❌ 배포 실패',  color: 'text-red-400' },
+  partial_failed:    { text: '⚠️ 부분 실패', color: 'text-yellow-400' },
+  created:           { text: '🔧 준비 중',    color: 'text-[#9ca3af]' },
+  destroying:        { text: '🗑️ 삭제 중',   color: 'text-orange-400' },
+  destroy_completed: { text: '🗑️ 삭제 완료', color: 'text-[#9ca3af]' },
+  destroy_failed:    { text: '⚠️ 삭제 실패', color: 'text-red-400' },
 }
 
 const DR_STATUS_CONFIG: Record<string, { text: string; color: string }> = {
@@ -62,6 +65,9 @@ export default function ProjectDetailPage() {
   const deployConf = STATUS_CONFIG[project.status]       ?? { text: project.status,    color: 'text-[#9ca3af]' }
   const drConf     = DR_STATUS_CONFIG[project.dr_status] ?? { text: project.dr_status, color: 'text-[#9ca3af]' }
 
+  // destroy 진행 중 여부
+  const isDestroying = project.status === 'destroying'
+
   return (
     <div className="px-6 py-8 md:px-12 md:py-12 max-w-5xl">
 
@@ -86,6 +92,14 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
+      {/* destroying 중 배너 */}
+      {isDestroying && (
+        <div className="mb-6 bg-orange-500/5 border border-orange-500/20 rounded-2xl px-4 py-3 text-sm text-orange-400 flex items-center gap-2">
+          <span className="animate-spin">⏳</span>
+          AWS 리소스 삭제가 진행 중입니다. 잠시 후 새로고침해주세요.
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
         {/* ── CraftOps 섹션 ── */}
@@ -95,13 +109,10 @@ export default function ProjectDetailPage() {
             <p className="text-sm text-[#9ca3af]">인프라 설계 · 배포</p>
           </div>
 
-          {/* 배포 상태 */}
           <div className="space-y-2">
             <div className="flex justify-between items-center text-sm">
               <span className="text-[#9ca3af]">배포 상태</span>
-              <span className={`font-medium ${deployConf.color}`}>
-                {deployConf.text}
-              </span>
+              <span className={`font-medium ${deployConf.color}`}>{deployConf.text}</span>
             </div>
             <div className="flex justify-between items-center text-sm">
               <span className="text-[#9ca3af]">마지막 배포</span>
@@ -113,20 +124,18 @@ export default function ProjectDetailPage() {
             </div>
           </div>
 
-          {/* CraftOps 액션 */}
           <div className="space-y-2 pt-2 border-t border-white/8">
-
-            {/* created → 첫 배포 시작 */}
+            {/* created → 위저드로 */}
             {project.status === 'created' && (
               <button
-                onClick={() => router.push(`/projects/${projectId}/validate`)}
+                onClick={() => router.push(`/projects/new?project_id=${projectId}`)}
                 className="w-full text-left px-4 py-3 rounded-2xl text-sm font-medium bg-white/5 hover:bg-white/10 transition-colors"
               >
                 🚀 배포 시작
               </button>
             )}
 
-            {/* deploying → 배포 로그 보기 */}
+            {/* deploying → 배포 로그 */}
             {project.status === 'deploying' && (
               <button
                 onClick={() => router.push(`/projects/${projectId}/deploy`)}
@@ -136,8 +145,20 @@ export default function ProjectDetailPage() {
               </button>
             )}
 
-            {/* completed / failed → 재배포 */}
-            {(project.status === 'completed' || project.status === 'failed') && (
+            {/* completed → 재배포 or 리소스 삭제 */}
+            {project.status === 'completed' && (
+              <>
+                <button
+                  onClick={() => router.push(`/projects/${projectId}/validate`)}
+                  className="w-full text-left px-4 py-3 rounded-2xl text-sm font-medium bg-white/5 hover:bg-white/10 transition-colors"
+                >
+                  🔄 재배포
+                </button>
+              </>
+            )}
+
+            {/* failed → 재배포 */}
+            {project.status === 'failed' && (
               <button
                 onClick={() => router.push(`/projects/${projectId}/validate`)}
                 className="w-full text-left px-4 py-3 rounded-2xl text-sm font-medium bg-white/5 hover:bg-white/10 transition-colors"
@@ -155,6 +176,21 @@ export default function ProjectDetailPage() {
                 ⚠️ Partial Failure 대응
               </button>
             )}
+
+            {/* destroying → 진행 중 표시만 */}
+            {project.status === 'destroying' && (
+              <div className="w-full px-4 py-3 rounded-2xl text-sm font-medium bg-orange-500/10 text-orange-400">
+                🗑️ 리소스 삭제 진행 중...
+              </div>
+            )}
+
+            {/* destroy_failed → 재시도 안내 */}
+            {project.status === 'destroy_failed' && (
+              <div className="w-full px-4 py-3 rounded-2xl text-sm bg-red-500/10 text-red-400 space-y-1">
+                <p className="font-medium">⚠️ 삭제 실패</p>
+                <p className="text-xs text-red-400/70">대시보드에서 다시 삭제를 시도하세요.</p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -165,13 +201,10 @@ export default function ProjectDetailPage() {
             <p className="text-sm text-[#9ca3af]">재해복구 · DR 모니터링</p>
           </div>
 
-          {/* DR 상태 */}
           <div className="space-y-2">
             <div className="flex justify-between items-center text-sm">
               <span className="text-[#9ca3af]">DR 상태</span>
-              <span className={`font-medium ${drConf.color}`}>
-                {drConf.text}
-              </span>
+              <span className={`font-medium ${drConf.color}`}>{drConf.text}</span>
             </div>
             <div className="flex justify-between items-center text-sm">
               <span className="text-[#9ca3af]">마지막 동기화</span>
@@ -183,7 +216,6 @@ export default function ProjectDetailPage() {
             </div>
           </div>
 
-          {/* MirrorOps 액션 */}
           <div className="space-y-2 pt-2 border-t border-white/8">
             <button
               onClick={() => router.push(`/projects/${projectId}/mirror`)}
@@ -203,8 +235,6 @@ export default function ProjectDetailPage() {
             >
               📦 DR Package
             </button>
-
-            {/* 페일오버 — DR ready 여부에 따라 강조 */}
             <button
               onClick={() => router.push(`/projects/${projectId}/failover`)}
               className={`w-full text-left px-4 py-3 rounded-2xl text-sm font-bold transition-colors ${

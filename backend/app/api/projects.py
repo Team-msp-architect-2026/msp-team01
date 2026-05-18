@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.project import Project
 from app.models.aws_account import AWSAccount
@@ -16,31 +17,24 @@ class CreateProjectRequest(BaseModel):
     name: str
     account_id: str
     region: str
-    prefix: str          # 네이밍 규칙 {prefix}-{env}-{resource}의 prefix
-    environment: str     # prod / staging / dev
+    prefix: str
+    environment: str
 
 
 @router.get("")
 def list_projects(
-    status: Optional[str] = Query(None, description="completed/deploying/failed"),
-    environment: Optional[str] = Query(None, description="prod/staging/dev"),
+    status: Optional[str] = Query(None),
+    environment: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """프로젝트 목록을 반환한다. status, environment 필터 지원."""
     query = db.query(Project).filter(Project.user_id == current_user.user_id)
-
     if status:
         query = query.filter(Project.status == status)
     if environment:
         query = query.filter(Project.environment == environment)
-
     projects = query.order_by(Project.created_at.desc()).all()
-
-    return {
-        "success": True,
-        "data": [_project_to_dict(p) for p in projects],
-    }
+    return {"success": True, "data": [_project_to_dict(p) for p in projects]}
 
 
 @router.post("", status_code=201)
@@ -49,19 +43,12 @@ def create_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    새 프로젝트를 생성한다.
-    prefix + environment 필드는 필수다. (ERD NOT NULL 제약)
-    네이밍 규칙 미리보기: {prefix}-{env}-{resource} (예: DD-prod-vpc)
-    """
-    # environment 유효성 검사
     if request.environment not in ("prod", "staging", "dev"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "VALIDATION_ERROR", "message": "environment는 prod, staging, dev 중 하나여야 합니다."},
         )
 
-    # 연동된 AWS 계정 소유 확인
     account = db.query(AWSAccount).filter(
         AWSAccount.account_id == request.account_id,
         AWSAccount.user_id == current_user.user_id,
@@ -87,11 +74,8 @@ def create_project(
     db.add(project)
     db.commit()
     db.refresh(project)
+    return {"success": True, "data": _project_to_dict(project)}
 
-    return {
-        "success": True,
-        "data": _project_to_dict(project),
-    }
 
 @router.get("/{project_id}")
 def get_project(
@@ -99,10 +83,8 @@ def get_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """프로젝트 상세 정보를 반환한다. aws_resources, dr_package 정보 포함."""
     project = _get_project_or_404(project_id, current_user.user_id, db)
 
-    # 최신 DR Package 조회
     from app.models.sync_history import DRPackage
     latest_package = db.query(DRPackage).filter(
         DRPackage.project_id == project_id,
@@ -133,19 +115,87 @@ def delete_project(
 ):
     project = db.query(Project).filter(
         Project.project_id == project_id,
-        Project.user_id == current_user.user_id
+        Project.user_id == current_user.user_id,
     ).first()
 
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
+    # ── destroy_aws_resources=True: AWS 리소스 먼저 destroy ──────────
+    if request.destroy_aws_resources and project.status in (
+        "completed", "partial_failed", "failed", "destroy_failed"
+    ):
+        from app.models.deployment import Deployment
+        from app.services.craftops.runner import TerraformRunnerService
+
+        # 최신 deployment 조회
+        latest_deployment = (
+            db.query(Deployment)
+            .filter(Deployment.project_id == project_id)
+            .order_by(Deployment.created_at.desc())
+            .first()
+        )
+
+        if latest_deployment:
+            account = db.query(AWSAccount).filter(
+                AWSAccount.account_id == project.account_id,
+            ).first()
+
+            if not account:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "NOT_FOUND", "message": "AWS 계정 정보를 찾을 수 없습니다."},
+                )
+
+            # destroying 상태로 전환 — 콜백에서 destroyed 오면 DB 삭제 진행
+            project.status = "destroying"
+            latest_deployment.status = "destroying"
+            latest_deployment.error_message = None
+            db.commit()
+
+            runner = TerraformRunnerService()
+            try:
+                runner.spawn_destroy_task(
+                    project_id=project_id,
+                    deployment_id=latest_deployment.deployment_id,
+                    role_arn=account.role_arn,
+                    region=project.region,
+                    user_id=project.user_id,
+                    subnet_ids=settings.platform_subnet_ids.split(","),
+                    security_group_ids=settings.platform_sg_ids.split(","),
+                )
+            except Exception as e:
+                # ECS spawn 실패 시 상태 원복
+                project.status = "destroy_failed"
+                latest_deployment.status = "destroy_failed"
+                latest_deployment.error_message = f"ECS Task 실행 실패: {str(e)}"
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={"code": "SPAWN_FAILED", "message": f"ECS Task 실행에 실패했습니다: {str(e)}"},
+                )
+
+            return {
+                "success": True,
+                "message": "AWS 리소스 삭제가 시작되었습니다. 삭제 완료 후 프로젝트가 자동으로 제거됩니다.",
+                "status": "destroying",
+            }
+
+    # ── destroy_aws_resources=False 또는 배포 없는 경우: DB만 삭제 ──
+    _delete_project_records(project_id, project, db)
+
+    return {"success": True, "message": "프로젝트가 삭제되었습니다."}
+
+
+def _delete_project_records(project_id: str, project: Project, db: Session) -> None:
+    """프로젝트 관련 DB 레코드 전체 삭제 (CASCADE 수동 처리)"""
     from app.models.deployment import Deployment, DeploymentResource
     from app.models.aws_resource import AWSResource
     from app.models.gcp_mapping import GCPMapping
     from app.models.sync_history import SyncHistory, DRPackage
     from app.models.failover_history import FailoverHistory
 
-    # [FIX] failover_history 먼저 삭제 (NOT NULL FK 제약)
+    # failover_history 먼저 (NOT NULL FK)
     db.query(FailoverHistory).filter(
         FailoverHistory.project_id == project_id
     ).delete(synchronize_session=False)
@@ -185,10 +235,8 @@ def delete_project(
     db.delete(project)
     db.commit()
 
-    return {"success": True, "message": "프로젝트가 삭제되었습니다."}
 
-
-# ── 헬퍼 함수 ──────────────────────────────────────────────────────
+# ── 헬퍼 ──────────────────────────────────────────────────────────
 def _get_project_or_404(project_id: str, user_id: str, db: Session) -> Project:
     project = db.query(Project).filter(
         Project.project_id == project_id,
@@ -204,14 +252,14 @@ def _get_project_or_404(project_id: str, user_id: str, db: Session) -> Project:
 
 def _project_to_dict(project: Project) -> dict:
     return {
-        "project_id": project.project_id,
-        "name": project.name,
-        "prefix": project.prefix,
-        "environment": project.environment,
-        "region": project.region,
-        "status": project.status,
-        "dr_status": project.dr_status,
+        "project_id":     project.project_id,
+        "name":           project.name,
+        "prefix":         project.prefix,
+        "environment":    project.environment,
+        "region":         project.region,
+        "status":         project.status,
+        "dr_status":      project.dr_status,
         "last_deployed_at": project.last_deployed_at.isoformat() if project.last_deployed_at else None,
-        "last_synced_at": project.last_synced_at.isoformat() if project.last_synced_at else None,
-        "created_at": project.created_at.isoformat(),
+        "last_synced_at":   project.last_synced_at.isoformat() if project.last_synced_at else None,
+        "created_at":       project.created_at.isoformat(),
     }

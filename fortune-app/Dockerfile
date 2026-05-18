@@ -8,8 +8,8 @@ COPY index.html /usr/share/nginx/html/index.html
 
 # Health check (ALB Target Group 헬스체크용)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- http://localhost:80/health || exit 1
+  CMD wget -qO- http://localhost:8080/health || exit 1
 
-EXPOSE 80
+EXPOSE 8080
 
 CMD ["nginx", "-g", "daemon off;"]
