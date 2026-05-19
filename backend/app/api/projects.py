@@ -93,10 +93,10 @@ def get_project(
 
     result = _project_to_dict(project)
     result["dr_package"] = {
-        "status": latest_package.status if latest_package else None,
+        "status":          latest_package.status          if latest_package else None,
         "snapshot_status": latest_package.snapshot_status if latest_package else None,
-        "rto_minutes": latest_package.rto_minutes if latest_package else None,
-        "rpo_minutes": latest_package.rpo_minutes if latest_package else None,
+        "rto_minutes":     latest_package.rto_minutes     if latest_package else None,
+        "rpo_minutes":     latest_package.rpo_minutes     if latest_package else None,
     } if latest_package else None
 
     return {"success": True, "data": result}
@@ -121,18 +121,17 @@ def delete_project(
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
-    # ── destroy_aws_resources=True: AWS 리소스 먼저 destroy ──────────
+    # terraform destroy는 fire-and-forget — 콜백 기다리지 않음
     if request.destroy_aws_resources and project.status in (
         "completed", "partial_failed", "failed", "destroy_failed"
     ):
         from app.models.deployment import Deployment
         from app.services.craftops.runner import TerraformRunnerService
 
-        # 최신 deployment 조회
         latest_deployment = (
             db.query(Deployment)
             .filter(Deployment.project_id == project_id)
-            .order_by(Deployment.created_at.desc())
+            .order_by(Deployment.started_at.desc())
             .first()
         )
 
@@ -147,12 +146,6 @@ def delete_project(
                     detail={"code": "NOT_FOUND", "message": "AWS 계정 정보를 찾을 수 없습니다."},
                 )
 
-            # destroying 상태로 전환 — 콜백에서 destroyed 오면 DB 삭제 진행
-            project.status = "destroying"
-            latest_deployment.status = "destroying"
-            latest_deployment.error_message = None
-            db.commit()
-
             runner = TerraformRunnerService()
             try:
                 runner.spawn_destroy_task(
@@ -165,30 +158,20 @@ def delete_project(
                     security_group_ids=settings.platform_sg_ids.split(","),
                 )
             except Exception as e:
-                # ECS spawn 실패 시 상태 원복
-                project.status = "destroy_failed"
-                latest_deployment.status = "destroy_failed"
-                latest_deployment.error_message = f"ECS Task 실행 실패: {str(e)}"
-                db.commit()
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"code": "SPAWN_FAILED", "message": f"ECS Task 실행에 실패했습니다: {str(e)}"},
+                    detail={"code": "SPAWN_FAILED", "message": f"AWS 리소스 삭제 Task 실행에 실패했습니다: {str(e)}"},
                 )
 
-            return {
-                "success": True,
-                "message": "AWS 리소스 삭제가 시작되었습니다. 삭제 완료 후 프로젝트가 자동으로 제거됩니다.",
-                "status": "destroying",
-            }
-
-    # ── destroy_aws_resources=False 또는 배포 없는 경우: DB만 삭제 ──
+    # destroy_aws_resources 여부와 관계없이 DB + S3 즉시 삭제
     _delete_project_records(project_id, project, db)
 
     return {"success": True, "message": "프로젝트가 삭제되었습니다."}
 
 
 def _delete_project_records(project_id: str, project: Project, db: Session) -> None:
-    """프로젝트 관련 DB 레코드 전체 삭제 (CASCADE 수동 처리)"""
+    """프로젝트 관련 DB 레코드 전체 삭제 + S3 DR Package 클린업"""
+    import boto3 as _boto3
     from app.models.deployment import Deployment, DeploymentResource
     from app.models.aws_resource import AWSResource
     from app.models.gcp_mapping import GCPMapping
@@ -200,14 +183,11 @@ def _delete_project_records(project_id: str, project: Project, db: Session) -> N
         FailoverHistory.project_id == project_id
     ).delete(synchronize_session=False)
 
-    # GCPMapping → AWSResource
-    aws_resources = db.query(AWSResource).filter(
-        AWSResource.project_id == project_id
-    ).all()
-    for r in aws_resources:
-        db.query(GCPMapping).filter(
-            GCPMapping.aws_resource_id == r.resource_id
-        ).delete(synchronize_session=False)
+    # GCPMapping을 project_id로 직접 삭제
+    db.query(GCPMapping).filter(
+        GCPMapping.project_id == project_id
+    ).delete(synchronize_session=False)
+
     db.query(AWSResource).filter(
         AWSResource.project_id == project_id
     ).delete(synchronize_session=False)
@@ -224,7 +204,6 @@ def _delete_project_records(project_id: str, project: Project, db: Session) -> N
         Deployment.project_id == project_id
     ).delete(synchronize_session=False)
 
-    # 나머지
     db.query(DRPackage).filter(
         DRPackage.project_id == project_id
     ).delete(synchronize_session=False)
@@ -234,6 +213,22 @@ def _delete_project_records(project_id: str, project: Project, db: Session) -> N
 
     db.delete(project)
     db.commit()
+
+    # S3 DR Package 클린업
+    try:
+        s3 = _boto3.client("s3", region_name="us-west-2")
+        prefix = f"projects/{project_id}/"
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket="autoops-dr-packages", Prefix=prefix):
+            objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            if objects:
+                s3.delete_objects(
+                    Bucket="autoops-dr-packages",
+                    Delete={"Objects": objects},
+                )
+        print(f"[Delete] S3 DR Package 클린업 완료: projects/{project_id}/")
+    except Exception as e:
+        print(f"[Delete] S3 클린업 실패 (무시): {e}")
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────
@@ -252,14 +247,14 @@ def _get_project_or_404(project_id: str, user_id: str, db: Session) -> Project:
 
 def _project_to_dict(project: Project) -> dict:
     return {
-        "project_id":     project.project_id,
-        "name":           project.name,
-        "prefix":         project.prefix,
-        "environment":    project.environment,
-        "region":         project.region,
-        "status":         project.status,
-        "dr_status":      project.dr_status,
+        "project_id":       project.project_id,
+        "name":             project.name,
+        "prefix":           project.prefix,
+        "environment":      project.environment,
+        "region":           project.region,
+        "status":           project.status,
+        "dr_status":        project.dr_status,
         "last_deployed_at": project.last_deployed_at.isoformat() if project.last_deployed_at else None,
-        "last_synced_at":   project.last_synced_at.isoformat() if project.last_synced_at else None,
+        "last_synced_at":   project.last_synced_at.isoformat()   if project.last_synced_at   else None,
         "created_at":       project.created_at.isoformat(),
     }
