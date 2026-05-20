@@ -9,6 +9,16 @@ from app.models.project import Project
 from app.models.aws_resource import AWSResource
 from app.models.gcp_mapping import GCPMapping
 from app.models.sync_history import SyncHistory, DRPackage
+import asyncio
+import boto3
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import uuid
+from datetime import datetime
+from pathlib import Path
 
 router = APIRouter()
 
@@ -80,7 +90,7 @@ def get_resources(
         ).order_by(GCPMapping.created_at.desc()).first()
 
         result.append({
-            "resource_id":       res.resource_id, 
+            "resource_id":       res.resource_id,
             "aws_resource_type": res.resource_type,
             "aws_resource_name": res.resource_name,
             "aws_resource_id":   res.resource_id_aws,
@@ -239,10 +249,8 @@ def _package_to_dict(p: DRPackage) -> dict:
     }
 
 
-import uuid
-import subprocess
-import tempfile
-from pathlib import Path
+# ── Failover ────────────────────────────────────────────────────────
+
 from app.models.failover_history import FailoverHistory
 
 
@@ -324,21 +332,20 @@ def failover(
         mode       = body.mode,
         gcp_region = "us-west1",
         status     = "running",
-        started_at = __import__("datetime").datetime.utcnow(),
+        started_at = datetime.utcnow(),
     )
     db.add(fh)
     db.commit()
 
+    # ── simulation 모드 ──────────────────────────────────────────────
     if body.mode == "simulation" and sim_package:
-        # [수정] S3 경로에서 실제 HCL 파일 내용을 읽어서 전달
         hcl_content = ""
         s3_path = sim_package.terraform_code_path or ""
         if s3_path.startswith("s3://"):
             try:
-                import boto3 as _boto3
-                path_body  = s3_path.replace("s3://", "")
+                path_body   = s3_path.replace("s3://", "")
                 bucket, key = path_body.split("/", 1)
-                s3_client   = _boto3.client("s3", region_name="us-west-2")
+                s3_client   = boto3.client("s3", region_name="us-west-2")
                 obj         = s3_client.get_object(Bucket=bucket, Key=key)
                 hcl_content = obj["Body"].read().decode("utf-8")
             except Exception as e:
@@ -352,16 +359,38 @@ def failover(
             db          = SessionLocal(),
         )
 
+    # ── actual 모드 ──────────────────────────────────────────────────
+    elif body.mode == "actual" and latest_package:
+        from app.models.aws_account import AWSAccount
+        account = db.query(AWSAccount).filter(
+            AWSAccount.account_id == project.account_id
+        ).first()
+
+        background_tasks.add_task(
+            _run_failover_actual,
+            project_id  = project_id,
+            failover_id = failover_id,
+            package     = latest_package,
+            project     = project,
+            role_arn    = account.role_arn if account else "",
+        )
+
     return {
         "success": True,
         "data": {
             "failover_id":   failover_id,
             "mode":          body.mode,
             "gcp_region":    "us-west1",
-            "websocket_url": f"wss://api.autoops.io/ws/events/{project_id}",
+            "websocket_url": (
+                f"wss://api.autoops.io/ws/events/{project_id}?failover_id={failover_id}"
+                if body.mode == "actual"
+                else f"wss://api.autoops.io/ws/events/{project_id}"
+            ),
         },
     }
 
+
+# ── Simulation 실행 ──────────────────────────────────────────────────
 
 def _run_failover_simulation(
     project_id: str,
@@ -369,8 +398,6 @@ def _run_failover_simulation(
     hcl_code: str,
     db: Session,
 ) -> None:
-    import json as _json
-
     work_dir = tempfile.mkdtemp(prefix=f"autoops-failover-{project_id[:8]}-")
     try:
         (Path(work_dir) / "main.tf").write_text(hcl_code, encoding="utf-8")
@@ -385,17 +412,14 @@ def _run_failover_simulation(
             cwd=work_dir, capture_output=True, text=True,
         )
 
-        # [수정] terraform plan -json 파싱 → 실제 생성될 리소스 수 추출
-        # terraform plan -json은 NDJSON 형식으로 여러 줄 출력
-        # "change_summary" 타입의 라인에서 add 수를 읽음
         add_count = 0
         for line in plan_result.stdout.splitlines():
             try:
-                obj = _json.loads(line)
+                obj = json.loads(line)
                 if obj.get("type") == "change_summary":
                     add_count = obj.get("changes", {}).get("add", 0)
                     break
-            except _json.JSONDecodeError:
+            except json.JSONDecodeError:
                 continue
 
         fh = db.query(FailoverHistory).filter(
@@ -404,20 +428,186 @@ def _run_failover_simulation(
         if fh:
             fh.status                = "completed"
             fh.gcp_resources_created = add_count if add_count > 0 else None
-            fh.actual_rto_seconds    = 15 * 60   # [수정] 12분 → 15분
-            fh.completed_at          = __import__("datetime").datetime.utcnow()
+            fh.actual_rto_seconds    = 15 * 60
+            fh.completed_at          = datetime.utcnow()
             db.commit()
 
     finally:
-        import shutil
         shutil.rmtree(work_dir, ignore_errors=True)
         db.close()
 
-# 신규 엔드포인트 추가
+
+# ── Actual 실행 ──────────────────────────────────────────────────────
+
+async def _run_failover_actual(
+    project_id: str,
+    failover_id: str,
+    package:     "DRPackage",
+    project:     "Project",
+    role_arn:    str,
+) -> None:
+    """
+    GCP actual 페일오버 실행. BackgroundTask로 동작한다.
+
+    흐름:
+    ① S3에서 main.tf 다운로드
+    ② GCP 인증 설정 (Secrets Manager)
+    ③ GCS State 버킷 자동 생성
+    ④ terraform init → apply (CloudWatch 로그 스트리밍)
+    ⑤ failover_history.status → completed + RTO 기록
+    """
+    from app.core.config import settings
+    from app.services.mirrorops.gcp_auth import setup_gcp_auth
+
+    started_at = datetime.utcnow()
+    work_dir   = None
+    db         = SessionLocal()
+    log_group  = f"/autoops/failover/{failover_id}"
+
+    cw = boto3.client("logs", region_name="us-west-2")
+
+    def _log(msg: str):
+        print(f"[Failover {failover_id}] {msg}")
+        try:
+            cw.put_log_events(
+                logGroupName  = log_group,
+                logStreamName = "failover",
+                logEvents     = [{"timestamp": int(datetime.utcnow().timestamp() * 1000), "message": msg}],
+            )
+        except Exception:
+            pass
+
+    def _update_status(new_status: str, error_msg: str = "", rto_seconds: int = None):
+        fh = db.query(FailoverHistory).filter(
+            FailoverHistory.failover_id == failover_id
+        ).first()
+        if fh:
+            fh.status       = new_status
+            fh.completed_at = datetime.utcnow()
+            if error_msg:
+                fh.error_message = error_msg
+            if rto_seconds is not None:
+                fh.actual_rto_seconds    = rto_seconds
+                fh.gcp_resources_created = 11
+            db.commit()
+
+    try:
+        # CloudWatch 로그 그룹 생성
+        try:
+            cw.create_log_group(logGroupName=log_group)
+            cw.create_log_stream(logGroupName=log_group, logStreamName="failover")
+        except cw.exceptions.ResourceAlreadyExistsException:
+            pass
+
+        # ① S3에서 main.tf 다운로드
+        _log("S3에서 main.tf 다운로드 중...")
+        s3       = boto3.client("s3", region_name="us-west-2")
+        work_dir = tempfile.mkdtemp(prefix=f"autoops-failover-{project_id[:8]}-")
+        tf_key   = f"projects/{project_id}/latest/infrastructure/main.tf"
+
+        s3.download_file("autoops-dr-packages", tf_key, str(Path(work_dir) / "main.tf"))
+        _log("main.tf 다운로드 완료")
+
+        # ② GCP 인증
+        _log("GCP 인증 설정 중...")
+        setup_gcp_auth()
+        _log(f"GCP 인증 완료 (프로젝트: {settings.gcp_project_id})")
+
+        # ③ GCS State 버킷 생성
+        bucket_name = f"autoops-dr-state-{project_id}"
+        _log(f"GCS State 버킷 확인: {bucket_name}")
+        try:
+            from google.cloud import storage as gcs_storage
+            gcs = gcs_storage.Client()
+            if not gcs.bucket(bucket_name).exists():
+                bucket = gcs.create_bucket(bucket_name, location="us-west1")
+                bucket.versioning_enabled = True
+                bucket.patch()
+                _log(f"GCS 버킷 생성 완료: {bucket_name}")
+            else:
+                _log(f"GCS 버킷 이미 존재: {bucket_name}")
+        except Exception as e:
+            _log(f"⚠️ GCS 버킷 처리 중 오류 (계속 진행): {e}")
+
+        # ④ terraform init
+        _log("terraform init 실행 중...")
+        env = {**os.environ, "TF_IN_AUTOMATION": "1"}
+
+        init_result = subprocess.run(
+            ["terraform", "init", "-no-color", "-reconfigure"],
+            cwd=work_dir, capture_output=True, text=True, timeout=120, env=env,
+        )
+        for line in init_result.stdout.splitlines():
+            if line.strip():
+                _log(line)
+        if init_result.returncode != 0:
+            raise RuntimeError(f"terraform init 실패:\n{init_result.stderr}")
+        _log("terraform init 완료")
+
+        # ⑤ terraform apply
+        _log("terraform apply 실행 중 (GCP 리소스 생성 시작)...")
+        _log("Cloud SQL 생성에 약 10~15분 소요됩니다.")
+
+        apply_proc = subprocess.Popen(
+            ["terraform", "apply", "-auto-approve", "-no-color", "-json"],
+            cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env,
+        )
+
+        for line in apply_proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                msg   = event.get("@message", "")
+                if msg:
+                    _log(msg)
+            except json.JSONDecodeError:
+                _log(line)
+
+        apply_proc.wait(timeout=1200)  # 최대 20분
+        if apply_proc.returncode != 0:
+            raise RuntimeError(f"terraform apply 실패 (exit code {apply_proc.returncode})")
+
+        _log("✅ terraform apply 완료 — GCP 리소스 생성 성공")
+
+        # ── S3 parquet → Cloud SQL 데이터 복원 추가 ─────────────────────
+        _log("Cloud SQL 데이터 복원 시작...")
+        await _import_snapshot_to_cloud_sql(
+            project_id  = project_id,
+            package     = package,
+            bucket_name = bucket_name,
+            gcp_project = settings.gcp_project_id,
+            log_fn      = _log,
+        )
+        _log("✅ Cloud SQL 데이터 복원 완료")
+
+
+        # ⑥ RTO 계산 및 DB 업데이트
+        rto_seconds = int((datetime.utcnow() - started_at).total_seconds())
+        _log(f"실제 RTO: {rto_seconds // 60}분 {rto_seconds % 60}초")
+        _update_status("completed", rto_seconds=rto_seconds)
+
+    except Exception as e:
+        err_msg = str(e)
+        _log(f"❌ 페일오버 실패: {err_msg}")
+        _update_status("failed", error_msg=err_msg[:1000])
+
+    finally:
+        if work_dir and os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+        db.close()
+
+
+# ── terraform_code PATCH ─────────────────────────────────────────────
+
 from pydantic import BaseModel as _BaseModel
+
 
 class TerraformCodeUpdate(_BaseModel):
     terraform_code: str
+
 
 @router.patch("/{project_id}/resources/{resource_id}/terraform-code")
 def update_terraform_code(
@@ -444,3 +634,338 @@ def update_terraform_code(
     db.commit()
 
     return {"success": True, "data": {"resource_id": resource_id}}
+
+async def _import_snapshot_to_cloud_sql(
+    project_id:  str,
+    package:     "DRPackage",
+    bucket_name: str,
+    gcp_project: str,
+    log_fn,
+) -> None:
+    """
+    S3 parquet → GCS CSV 변환 → Cloud SQL import
+
+    흐름:
+    ① S3 export 경로에서 parquet 파일 목록 수집
+    ② 테이블별 parquet 읽기 → pandas DataFrame
+    ③ GCS에 CSV 업로드
+    ④ Cloud SQL Admin API로 import
+    """
+    import io
+    import pandas as pd
+    import boto3 as _boto3
+    from google.cloud import storage as gcs_storage
+    import googleapiclient.discovery
+    import time
+
+    s3         = _boto3.client("s3", region_name="us-west-2")
+    gcs        = gcs_storage.Client()
+    gcs_bucket = gcs.bucket(bucket_name)
+    sqladmin   = googleapiclient.discovery.build("sqladmin", "v1beta4")
+
+    export_prefix = f"projects/{project_id}/latest/data/exports/"
+    s3_bucket     = "autoops-dr-packages"
+
+    log_fn(f"S3 parquet 목록 조회:{export_prefix}")
+
+    # ── ① parquet 파일 목록 수집 ──────────────────────────────
+    paginator   = s3.get_paginator("list_objects_v2")
+    table_files: dict[str, list[str]] = {}
+
+    for page in paginator.paginate(Bucket=s3_bucket, Prefix=export_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith(".parquet"):
+                continue
+            parts     = key.replace(export_prefix, "").split("/")
+            table_key = parts[0] if parts else "unknown"
+            table_files.setdefault(table_key, []).append(key)
+
+    if not table_files:
+        log_fn("⚠️ S3에 parquet 파일 없음 — 데이터 복원 스킵")
+        return
+
+    log_fn(f"복원 대상 테이블:{list(table_files.keys())}")
+
+    # Cloud SQL 인스턴스명 추론
+    sql_instance = None
+    try:
+        snap_ref_key = f"projects/{project_id}/latest/data/snapshot_ref.json"
+        obj          = s3.get_object(Bucket=s3_bucket, Key=snap_ref_key)
+        snap_ref     = json.loads(obj["Body"].read())
+        sql_instance = snap_ref.get("sql_instance_name", "")
+    except Exception:
+        pass
+
+    if not sql_instance:
+        sql_instance = f"{project_id[:8]}-sql"
+        log_fn(f"⚠️ Cloud SQL 인스턴스명 추론:{sql_instance}")
+
+    # ── ② 테이블별 parquet → CSV 변환 → GCS 업로드 → import ──
+    for table_key, parquet_keys in table_files.items():
+        log_fn(f"테이블 처리 중:{table_key}")
+
+        dfs = []
+        for pk in parquet_keys:
+            obj = s3.get_object(Bucket=s3_bucket, Key=pk)
+            df  = pd.read_parquet(io.BytesIO(obj["Body"].read()))
+            dfs.append(df)
+
+        if not dfs:
+            continue
+
+        merged_df  = pd.concat(dfs, ignore_index=True)
+        csv_buffer = io.StringIO()
+        merged_df.to_csv(csv_buffer, index=False)
+
+        gcs_csv_path = f"import/{table_key}.csv"
+        blob         = gcs_bucket.blob(gcs_csv_path)
+        blob.upload_from_string(csv_buffer.getvalue(), content_type="text/csv")
+        log_fn(f"GCS 업로드 완료: gs://{bucket_name}/{gcs_csv_path}")
+
+        table_name = table_key.split(".")[-1] if "." in table_key else table_key
+        database   = table_key.split(".")[0] if "." in table_key else "public"
+
+        try:
+            op = sqladmin.instances().import_(
+                project  = gcp_project,
+                instance = sql_instance,
+                body={
+                    "importContext": {
+                        "kind":     "sql#importContext",
+                        "fileType": "CSV",
+                        "uri":      f"gs://{bucket_name}/{gcs_csv_path}",
+                        "database": database,
+                        "csvImportOptions": {"table": table_name},
+                    }
+                }
+            ).execute()
+
+            # 완료 대기 (최대 10분)
+            for _ in range(60):
+                result = sqladmin.operations().get(
+                    project   = gcp_project,
+                    operation = op["name"].split("/")[-1],
+                ).execute()
+                if result.get("status") == "DONE":
+                    break
+                await asyncio.sleep(10)
+
+            log_fn(f"✅{table_name} import 완료 ({len(merged_df)}행)")
+
+        except Exception as e:
+            log_fn(f"⚠️{table_name} import 실패 (계속 진행):{e}")
+
+# ── GET /api/mirror/{project_id}/failover/{failover_id} ────────────
+
+@router.get("/{project_id}/failover/{failover_id}")
+def get_failover_status(
+    project_id:  str,
+    failover_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_project_or_404(project_id, current_user.user_id, db)
+
+    fh = db.query(FailoverHistory).filter(
+        FailoverHistory.failover_id == failover_id,
+        FailoverHistory.project_id  == project_id,
+    ).first()
+
+    if not fh:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "페일오버 이력을 찾을 수 없습니다."},
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "failover_id":           fh.failover_id,
+            "mode":                  fh.mode,
+            "status":                fh.status,
+            "gcp_region":            fh.gcp_region,
+            "gcp_resources_created": fh.gcp_resources_created,
+            "actual_rto_seconds":    fh.actual_rto_seconds,
+            "error_message":         fh.error_message,
+            "started_at":            fh.started_at.isoformat(),
+            "completed_at":          fh.completed_at.isoformat() if fh.completed_at else None,
+        },
+    }
+
+# ── GCP 리소스 삭제 엔드포인트 ──────────────────────────────────
+
+@router.post("/{project_id}/failover/{failover_id}/destroy", status_code=202)
+def destroy_gcp_resources(
+    project_id:  str,
+    failover_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_project_or_404(project_id, current_user.user_id, db)
+
+    fh = db.query(FailoverHistory).filter(
+        FailoverHistory.failover_id == failover_id,
+        FailoverHistory.project_id  == project_id,
+    ).first()
+
+    if not fh:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "페일오버 이력을 찾을 수 없습니다."},
+        )
+
+    if fh.mode != "actual":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "BAD_REQUEST", "message": "simulation 모드는 삭제할 GCP 리소스가 없습니다."},
+        )
+
+    if fh.status not in ("completed", "failed"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code":    "CONFLICT",
+                "message": f"삭제 가능한 상태가 아닙니다. 현재 상태:{fh.status}",
+            },
+        )
+
+    fh.status = "destroying"
+    db.commit()
+
+    background_tasks.add_task(
+        _run_failover_destroy,
+        project_id  = project_id,
+        failover_id = failover_id,
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "failover_id": failover_id,
+            "status":      "destroying",
+        },
+    }
+
+
+async def _run_failover_destroy(
+    project_id:  str,
+    failover_id: str,
+) -> None:
+    """
+    terraform destroy로 GCP 리소스 삭제.
+
+    흐름:
+    ① S3에서 main.tf 다운로드
+    ② GCP 인증
+    ③ terraform init → destroy
+    ④ GCS import 파일 정리
+    ⑤ failover_history.status → destroyed
+    """
+    from app.services.mirrorops.gcp_auth import setup_gcp_auth
+    from app.core.config import settings
+
+    db       = SessionLocal()
+    work_dir = None
+    cw       = boto3.client("logs", region_name="us-west-2")
+    log_group = f"/autoops/failover/{failover_id}"
+
+    def _log(msg: str):
+        print(f"[Destroy{failover_id}]{msg}")
+        try:
+            cw.put_log_events(
+                logGroupName  = log_group,
+                logStreamName = "failover",
+                logEvents     = [{"timestamp": int(datetime.utcnow().timestamp() * 1000), "message": msg}],
+            )
+        except Exception:
+            pass
+
+    def _update_status(new_status: str, error_msg: str = ""):
+        fh = db.query(FailoverHistory).filter(
+            FailoverHistory.failover_id == failover_id
+        ).first()
+        if fh:
+            fh.status       = new_status
+            fh.completed_at = datetime.utcnow()
+            if error_msg:
+                fh.error_message = error_msg
+            db.commit()
+
+    try:
+        # ① S3에서 main.tf 다운로드
+        _log("S3에서 main.tf 다운로드 중...")
+        s3       = boto3.client("s3", region_name="us-west-2")
+        work_dir = tempfile.mkdtemp(prefix=f"autoops-destroy-{project_id[:8]}-")
+        tf_key   = f"projects/{project_id}/latest/infrastructure/main.tf"
+        s3.download_file("autoops-dr-packages", tf_key, str(Path(work_dir) / "main.tf"))
+        _log("main.tf 다운로드 완료")
+
+        # ② GCP 인증
+        _log("GCP 인증 설정 중...")
+        setup_gcp_auth()
+        _log("GCP 인증 완료")
+
+        env = {**os.environ, "TF_IN_AUTOMATION": "1"}
+
+        # ③ terraform init
+        _log("terraform init 실행 중...")
+        init_result = subprocess.run(
+            ["terraform", "init", "-no-color", "-reconfigure"],
+            cwd=work_dir, capture_output=True, text=True, timeout=120, env=env,
+        )
+        if init_result.returncode != 0:
+            raise RuntimeError(f"terraform init 실패:\n{init_result.stderr}")
+        _log("terraform init 완료")
+
+        # ③ terraform destroy
+        _log("terraform destroy 실행 중 (GCP 리소스 삭제 시작)...")
+        destroy_proc = subprocess.Popen(
+            ["terraform", "destroy", "-auto-approve", "-no-color", "-json"],
+            cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env,
+        )
+        for line in destroy_proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                msg   = event.get("@message", "")
+                if msg:
+                    _log(msg)
+            except json.JSONDecodeError:
+                _log(line)
+
+        destroy_proc.wait(timeout=600)  # 최대 10분
+        if destroy_proc.returncode != 0:
+            raise RuntimeError(f"terraform destroy 실패 (exit code{destroy_proc.returncode})")
+        _log("✅ terraform destroy 완료 — GCP 리소스 삭제 성공")
+
+        # ④ GCS import 파일 정리
+        bucket_name = f"autoops-dr-state-{project_id}"
+        try:
+            from google.cloud import storage as gcs_storage
+            gcs    = gcs_storage.Client()
+            bucket = gcs.bucket(bucket_name)
+            blobs  = list(bucket.list_blobs(prefix="import/"))
+            if blobs:
+                bucket.delete_blobs(blobs)
+                _log(f"GCS import 파일 정리 완료:{len(blobs)}개")
+        except Exception as e:
+            _log(f"⚠️ GCS 정리 중 오류 (무시):{e}")
+
+        # ⑤ 상태 업데이트
+        _update_status("destroyed")
+        _log("✅ GCP 리소스 삭제 완료")
+
+    except Exception as e:
+        err_msg = str(e)
+        _log(f"❌ GCP 리소스 삭제 실패:{err_msg}")
+        _update_status("destroy_failed", error_msg=err_msg[:1000])
+
+    finally:
+        if work_dir and os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+        db.close()

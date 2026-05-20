@@ -107,6 +107,7 @@ export type WSEventType =
   | 'snapshot_ready'
   | 'failover_progress'
   | 'failover_completed'
+  | 'failover_failed' 
   | 'error'
 
 export interface WSEvent {

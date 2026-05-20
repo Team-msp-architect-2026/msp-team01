@@ -15,7 +15,7 @@ class FailoverHistory(Base):
     mode = Column(String(20), nullable=False)           # simulation / actual
     gcp_region = Column(String(50), nullable=False)
     status = Column(String(20), nullable=False, default="running")
-    # status: running / completed / failed
+    # status: running / completed / failed / destroying / destroyed / destroy_failed
     gcp_resources_created = Column(Integer, nullable=True)
     actual_rto_seconds = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
