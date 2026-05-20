@@ -35,7 +35,15 @@ RULE_BASED_MAP: dict[str, dict] = {
             ).lower().replace("_", "-"),
             "ip_cidr_range": cfg.get("cidrBlock", ""),
             "region":        "us-west1",
-            "network":       cfg.get("vpcId", "default-vpc").lower().replace("_", "-"),
+            # [수정] 이름 태그 앞 두 파트로 VPC명 추론 (AWS VPC ID 사용 금지)
+            "network": (
+                "-".join(
+                    (cfg.get("tags") or {}).get("Name", "")
+                    .lower().replace("_", "-").split("-")[:2]
+                ) + "-vpc"
+                if (cfg.get("tags") or {}).get("Name", "")
+                else "default-vpc"
+            ),
         },
     },
     "AWS::EC2::RouteTable": {
@@ -46,16 +54,35 @@ RULE_BASED_MAP: dict[str, dict] = {
                 (cfg.get("tags") or {}).get("Name", "") or
                 "router-" + cfg.get("routeTableId", "default")
             ).lower().replace("_", "-"),
-            "region":  "us-west1",
-            "network": cfg.get("vpcId", "default-vpc").lower().replace("_", "-"),
+            "region": "us-west1",
+            # [수정] 이름 태그 앞 두 파트로 VPC명 추론
+            "network": (
+                "-".join(
+                    (cfg.get("tags") or {}).get("Name", "")
+                    .lower().replace("_", "-").split("-")[:2]
+                ) + "-vpc"
+                if (cfg.get("tags") or {}).get("Name", "")
+                else "default-vpc"
+            ),
         },
     },
     "AWS::EC2::NatGateway": {
         "gcp_type":   "google_compute_router_nat",
         "confidence": "auto",
         "mapping":    lambda cfg: {
-            "name":                               "cloud-nat",
-            "router":                             "cloud-router",
+            # [수정] name, router 모두 이름 태그에서 동적 추론
+            "name": (
+                (cfg.get("tags") or {}).get("Name", "") or
+                "cloud-nat"
+            ).lower().replace("_", "-"),
+            "router": (
+                "-".join(
+                    (cfg.get("tags") or {}).get("Name", "")
+                    .lower().replace("_", "-").split("-")[:2]
+                ) + "-rt-public"
+                if (cfg.get("tags") or {}).get("Name", "")
+                else "cloud-router"
+            ),
             "region":                             "us-west1",
             "nat_ip_allocate_option":             "AUTO_ONLY",
             "source_subnetwork_ip_ranges_to_nat": "ALL_SUBNETWORKS_ALL_IP_RANGES",
@@ -137,7 +164,6 @@ class MappingEngine:
 
             rule = RULE_BASED_MAP.get(res.resource_type)
             if not rule:
-                # GCP 매핑 불필요 리소스와 수동 설정 리소스 구분
                 if res.resource_type in NOT_REQUIRED_RESOURCES:
                     mapping = self._create_not_required_mapping(res, project_id, sync_id)
                 else:
@@ -203,7 +229,6 @@ class MappingEngine:
     def _create_not_required_mapping(
         self, res: AWSResource, project_id: str, sync_id: str
     ) -> GCPMapping:
-        """GCP에 대응 개념이 없어 별도 생성이 불필요한 리소스"""
         return GCPMapping(
             resource_id       = res.resource_id,
             project_id        = project_id,

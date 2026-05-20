@@ -60,7 +60,13 @@ class DRPackager:
         self._upload_json(f"{s3_base}/data/snapshot_ref.json", snapshot_ref)
 
         # ③ GCP Terraform HCL 저장
-        self._upload_text(f"{s3_base}/infrastructure/main.tf", hcl_code)
+        import re as _re
+        hcl_patched = _re.sub(
+            r'image\s*=\s*"[^"]*"',
+            f'image = "{gcr_uri}"',
+            hcl_code
+        )
+        self._upload_text(f"{s3_base}/infrastructure/main.tf", hcl_patched)
 
         # dr-report.json 생성 (RTO 15, RPO 0)
         dr_report = {

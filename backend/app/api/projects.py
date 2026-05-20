@@ -166,7 +166,7 @@ def delete_project(
     # destroy_aws_resources 여부와 관계없이 DB + S3 즉시 삭제
     _delete_project_records(project_id, project, db)
 
-    return {"success": True, "message": "프로젝트가 삭제되었습니다."}
+    return {"success": True, "message": "프로젝트가 삭제됐습니다."}
 
 
 def _delete_project_records(project_id: str, project: Project, db: Session) -> None:
@@ -214,19 +214,25 @@ def _delete_project_records(project_id: str, project: Project, db: Session) -> N
     db.delete(project)
     db.commit()
 
-    # S3 DR Package 클린업
+    # [수정] S3 DR Package 클린업 — Versioning 활성화 버킷 대응
     try:
-        s3 = _boto3.client("s3", region_name="us-west-2")
-        prefix = f"projects/{project_id}/"
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket="autoops-dr-packages", Prefix=prefix):
-            objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        s3        = _boto3.client("s3", region_name="us-west-2")
+        prefix    = f"projects/{project_id}/"
+        s3_bucket = "autoops-dr-packages"
+
+        paginator = s3.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=s3_bucket, Prefix=prefix):
+            objects = []
+            for v in page.get("Versions", []):
+                objects.append({"Key": v["Key"], "VersionId": v["VersionId"]})
+            for m in page.get("DeleteMarkers", []):
+                objects.append({"Key": m["Key"], "VersionId": m["VersionId"]})
             if objects:
                 s3.delete_objects(
-                    Bucket="autoops-dr-packages",
+                    Bucket=s3_bucket,
                     Delete={"Objects": objects},
                 )
-        print(f"[Delete] S3 DR Package 클린업 완료: projects/{project_id}/")
+        print(f"[Delete] S3 DR Package 클린업 완료: {prefix}")
     except Exception as e:
         print(f"[Delete] S3 클린업 실패 (무시): {e}")
 

@@ -84,3 +84,17 @@ export interface FailoverResponse {
   gcp_region: string
   websocket_url: string
 }
+
+// destroy 관련 타입 추가
+export interface FailoverDestroyResponse {
+  failover_id: string
+  status:      'destroying'
+}
+
+export type FailoverStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'destroying'
+  | 'destroyed'
+  | 'destroy_failed'
