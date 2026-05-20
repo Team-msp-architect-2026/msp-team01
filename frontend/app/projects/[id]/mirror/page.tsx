@@ -1,28 +1,36 @@
 // frontend/app/projects/[id]/mirror/page.tsx
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { apiClient } from '@/lib/api'
 import { useDRStatus, useSyncHistory } from '@/hooks/useMirrorOps'
-import { Button } from '@/components/ui/button'
 
-const DR_STATUS_CONFIG = {
-  ready:     { label: '✅ 준비 완료',    badgeClass: 'bg-emerald-500/10 text-emerald-400' },
-  syncing:   { label: '🔄 동기화 중',    badgeClass: 'bg-blue-500/10 text-blue-400' },
-  not_ready: { label: '⚠️ 동기화 필요', badgeClass: 'bg-white/5 text-[#9ca3af]' },
+type DrTone = 'green' | 'blue' | 'mute'
+const DR_STATUS_CONFIG: Record<string, { label: string; tone: DrTone }> = {
+  ready:     { label: '준비 완료',    tone: 'green' },
+  syncing:   { label: '동기화 중',    tone: 'blue' },
+  not_ready: { label: '동기화 필요',  tone: 'mute' },
 }
 
-const PACKAGE_STATUS_CONFIG = {
-  ready:     { label: '✅ 준비 완료',                              color: 'text-emerald-400' },
-  preparing: { label: '⏳ 준비 중 (DB 스냅샷 Export 진행 중...)', color: 'text-yellow-400' },
-  failed:    { label: '❌ 생성 실패',                              color: 'text-red-400' },
+type PkgTone = 'green' | 'yellow' | 'red'
+const PACKAGE_STATUS_CONFIG: Record<string, { label: string; tone: PkgTone }> = {
+  ready:     { label: '준비 완료',                                  tone: 'green' },
+  preparing: { label: '준비 중 (DB 스냅샷 Export 진행 중...)',       tone: 'yellow' },
+  failed:    { label: '생성 실패',                                  tone: 'red' },
 }
 
 const TRIGGER_LABEL: Record<string, string> = {
   deployment_completed: '배포 완료',
   infra_changed:        '인프라 변경',
   manual:               '수동 동기화',
+}
+
+interface ProjectInfo {
+  name: string
+  region?: string
+  prefix?: string
+  environment?: string
 }
 
 export default function MirrorDashboardPage() {
@@ -32,6 +40,15 @@ export default function MirrorDashboardPage() {
 
   const { data: drStatus, isLoading, error, refetch } = useDRStatus(projectId)
   const { data: history } = useSyncHistory(projectId)
+
+  // ─ project name (auto-fetched, header에 표시) ─────────────────
+  const [project, setProject] = useState<ProjectInfo | null>(null)
+  useEffect(() => {
+    apiClient
+      .get(`/api/projects/${projectId}`)
+      .then((res) => setProject(res.data.data))
+      .catch(() => {})
+  }, [projectId])
 
   const [syncError, setSyncError] = useState<string | null>(null)
   const [isSyncing, setIsSyncing] = useState(false)
@@ -54,208 +71,846 @@ export default function MirrorDashboardPage() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-screen text-[#9ca3af]">
-        DR 상태 로딩 중...
-      </div>
+      <>
+        <style>{styles}</style>
+        <div className="mr-loading">
+          <span className="mr-spinner" />
+          <span>loading DR status</span>
+        </div>
+      </>
     )
   }
 
   if (error) {
     return (
-      <div className="px-6 py-8 md:px-12 md:py-12">
-        <p className="text-red-400">{error}</p>
-        <Button
-          variant="outline"
-          className="mt-3 border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white"
-          onClick={refetch}
-        >
-          다시 시도
-        </Button>
-      </div>
+      <>
+        <style>{styles}</style>
+        <Topbar projectName={project?.name} onBack={() => router.push(`/dashboard`)} />
+        <div className="mr-page">
+          <div className="mr-error-block">
+            <div className="mr-error-ico">!</div>
+            <div>
+              <div className="mr-error-title">DR 상태를 불러올 수 없습니다</div>
+              <div className="mr-error-msg">{error}</div>
+              <button className="mr-btn mr-btn-ghost mr-mt" onClick={refetch}>
+                <span className="mr-arrow">↻</span>
+                다시 시도
+              </button>
+            </div>
+          </div>
+        </div>
+      </>
     )
   }
 
   const statusKey       = drStatus?.dr_status ?? 'not_ready'
-  const statusConfig    = DR_STATUS_CONFIG[statusKey]
+  const statusConfig    = DR_STATUS_CONFIG[statusKey] ?? DR_STATUS_CONFIG.not_ready
   const pkg             = drStatus?.dr_package
   const pkgStatusConfig = pkg?.status ? PACKAGE_STATUS_CONFIG[pkg.status] : null
 
+  const awsRegion = project?.region ?? 'us-west-2'
+  const drReady   = statusKey === 'ready'
+
   return (
-    <div className="px-6 py-8 md:px-12 md:py-12 max-w-5xl">
+    <>
+      <style>{styles}</style>
+      <Topbar projectName={project?.name} onBack={() => router.push(`/dashboard`)} />
 
-      {/* 페이지 헤더 — [수정 3] 페일오버 버튼 헤더에서 제거 */}
-      <div className="mb-8 flex flex-col md:flex-row md:justify-between md:items-start gap-4">
-        <div>
-          <h2 className="text-2xl font-bold mb-1">MirrorOps</h2>
-          <p className="text-[#9ca3af] text-sm">
-            us-west-2 리전 기준 실시간 인프라 동기화 현황입니다.
-          </p>
-        </div>
-        {/* 수동 동기화만 헤더에 유지 */}
-        <Button
-          variant="outline"
-          className="border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white"
-          onClick={handleManualSync}
-          disabled={isSyncing}
-        >
-          {isSyncing ? '동기화 중...' : '🔄 수동 동기화'}
-        </Button>
-      </div>
+      <div className="mr-page">
 
-      {/* 동기화 에러 */}
-      {syncError && (
-        <div className="mb-4 bg-red-500/5 border border-red-500/20 rounded-xl p-3 text-sm text-red-400">
-          {syncError}
-        </div>
-      )}
-
-      {/* AWS Primary / GCP Standby */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        <div className="bg-[#121214] border border-white/8 rounded-3xl p-6">
-          <p className="text-xs text-[#9ca3af] font-semibold mb-3">AWS Primary</p>
-          <div className="flex items-center gap-3">
-            <span className="text-3xl">🟢</span>
-            <div>
-              <p className="font-semibold">운영 중</p>
-              <p className="text-xs text-[#9ca3af] mt-0.5">
-                리소스: {drStatus?.aws_resource_count ?? 0}개 · us-west-2
-              </p>
+        {/* Page header */}
+        <div className="mr-head">
+          <div className="mr-head-block">
+            <div className="mr-eyebrow">
+              <span className="mr-pip" />
+              MirrorOps · GCP DR
             </div>
-          </div>
-        </div>
-
-        <div className="bg-[#121214] border border-white/8 rounded-3xl p-6">
-          <p className="text-xs text-[#9ca3af] font-semibold mb-3">GCP Standby</p>
-          <div className="flex items-center gap-3">
-            <span className="text-3xl">
-              {drStatus?.dr_status === 'ready' ? '🟡' : '⚫'}
-            </span>
-            <div>
-              <p className="font-semibold">
-                {drStatus?.dr_status === 'ready' ? '대기 중' : 'DR 패키지 준비 중'}
-              </p>
-              <p className="text-xs text-[#9ca3af] mt-0.5">
-                리소스: {drStatus?.gcp_resource_count ?? 0}개 · us-west1
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* DR 상태 요약 */}
-      <div className="bg-[#121214] border border-white/8 rounded-3xl p-6 mb-6 space-y-4">
-        <div className="flex justify-between items-center">
-          <div>
-            <p className="text-xs text-[#9ca3af] mb-2">DR 상태</p>
-            <span className={`px-3 py-1 rounded-full text-xs font-semibold ${statusConfig.badgeClass}`}>
-              {statusConfig.label}
-            </span>
-          </div>
-          <div className="text-right">
-            <p className="text-xs text-[#9ca3af] mb-1">마지막 동기화</p>
-            <p className="text-sm font-medium">
-              {drStatus?.last_synced_at
-                ? new Date(drStatus.last_synced_at).toLocaleString('ko-KR')
-                : '-'}
+            <h1 className="mr-title">{project?.name ?? '프로젝트 로딩 중'}</h1>
+            <p className="mr-sub">
+              {awsRegion} 리전 기준 실시간 인프라 동기화 현황입니다.
             </p>
           </div>
-        </div>
-
-        {pkg && (
-          <div className="pt-4 border-t border-white/8 space-y-2">
-            <p className="text-sm font-medium">DR Package 구성 현황</p>
-            <p className={`text-sm ${pkgStatusConfig?.color}`}>
-              {pkgStatusConfig?.label}
-            </p>
-
-            {pkg.status === 'preparing' && (
-              <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-xl p-3 text-xs">
-                <p className="text-yellow-400">
-                  ⏳ DR 상태: 준비 중 (DB 스냅샷 Export 진행 중...)
-                </p>
-                <p className="text-yellow-400/70 mt-1">
-                  ✅ GCP Terraform 코드 · ✅ 컨테이너 이미지 · ⏳ RDS 스냅샷 Export
-                </p>
-              </div>
+          <button
+            className="mr-btn mr-btn-secondary"
+            onClick={handleManualSync}
+            disabled={isSyncing}
+          >
+            {isSyncing ? (
+              <>
+                <span className="mr-spinner-sm" />
+                <span>동기화 중...</span>
+              </>
+            ) : (
+              <>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>
+                </svg>
+                <span>수동 동기화</span>
+              </>
             )}
+          </button>
+        </div>
 
-            <div className="flex gap-6 pt-1">
-              <div>
-                <p className="text-xs text-[#9ca3af]">예상 RTO</p>
-                <p className="text-lg font-bold text-emerald-400">{pkg.rto_minutes ?? 12}분</p>
-              </div>
-              <div>
-                <p className="text-xs text-[#9ca3af]">예상 RPO</p>
-                <p className="text-lg font-bold text-emerald-400">{pkg.rpo_minutes ?? 3}분</p>
+        {/* Sync error */}
+        {syncError && (
+          <div className="mr-alert">
+            <span className="mr-alert-ico">!</span>
+            <span>{syncError}</span>
+          </div>
+        )}
+
+        {/* AWS Primary / GCP Standby */}
+        <div className="mr-split">
+          <div className="mr-card" data-tone="orange">
+            <div className="mr-card-head">
+              <span className="mr-card-eyebrow">
+                <span className="mr-pip" />
+                AWS Primary
+              </span>
+              <span className="mr-region">{awsRegion}</span>
+            </div>
+            <div className="mr-card-row">
+              <span className="mr-status" data-tone="green">
+                <span className="mr-status-pip" />
+                운영 중
+              </span>
+              <span className="mr-stat-num">
+                {drStatus?.aws_resource_count ?? 0}<small>개 리소스</small>
+              </span>
+            </div>
+          </div>
+
+          <div className="mr-card" data-tone="blue">
+            <div className="mr-card-head">
+              <span className="mr-card-eyebrow">
+                <span className="mr-pip" />
+                GCP Standby
+              </span>
+              <span className="mr-region">us-west1</span>
+            </div>
+            <div className="mr-card-row">
+              {drReady ? (
+                <span className="mr-status" data-tone="yellow">
+                  <span className="mr-status-pip" />
+                  대기 중
+                </span>
+              ) : (
+                <span className="mr-status" data-tone="mute">
+                  <span className="mr-status-pip" />
+                  DR 패키지 준비 중
+                </span>
+              )}
+              <span className="mr-stat-num">
+                {drStatus?.gcp_resource_count ?? 0}<small>개 리소스</small>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* DR status summary */}
+        <div className="mr-section">
+          <div className="mr-section-head">
+            <span className="mr-card-eyebrow">
+              <span className="mr-pip" />
+              DR 상태 · 페일오버 준비도
+            </span>
+          </div>
+
+          <div className="mr-status-row">
+            <div>
+              <div className="mr-label">현재 상태</div>
+              <span className="mr-status mr-status-lg" data-tone={statusConfig.tone}>
+                <span className="mr-status-pip" />
+                {statusConfig.label}
+              </span>
+            </div>
+            <div className="mr-text-right">
+              <div className="mr-label">마지막 동기화</div>
+              <div className="mr-mono mr-value">
+                {drStatus?.last_synced_at
+                  ? new Date(drStatus.last_synced_at).toLocaleString('ko-KR')
+                  : '-'}
               </div>
             </div>
           </div>
-        )}
 
-        {/* [수정 3] 페일오버 버튼 — DR 상태 카드 하단으로 이동 */}
-        <div className="pt-4 border-t border-white/8 flex flex-col sm:flex-row gap-3">
-          <Button
-            variant="outline"
-            className="border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white flex-1"
-            onClick={() => router.push(`/projects/${projectId}/mirror/resources`)}
-          >
-            🗂️ 리소스 매핑 현황
-          </Button>
-          <Button
-            variant="outline"
-            className="border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white flex-1"
-            onClick={() => router.push(`/projects/${projectId}/mirror/package`)}
-          >
-            📋 DR 리포트
-          </Button>
-          <Button
-            className="bg-red-600 hover:bg-red-700 text-white flex-1"
-            onClick={() => router.push(`/projects/${projectId}/failover`)}
-          >
-            🔴 페일오버 실행
-          </Button>
+          {pkg && (
+            <>
+              <div className="mr-divider" />
+
+              <div className="mr-pkg-row">
+                <div>
+                  <div className="mr-label">DR Package 구성</div>
+                  <span className="mr-status" data-tone={pkgStatusConfig?.tone ?? 'mute'}>
+                    <span className="mr-status-pip" />
+                    {pkgStatusConfig?.label ?? '확인 중'}
+                  </span>
+                </div>
+
+                <div className="mr-kpi-pair">
+                  <div className="mr-kpi-cell">
+                    <div className="mr-label">RTO</div>
+                    <div className="mr-kpi-val">{pkg.rto_minutes ?? 12}<small>분</small></div>
+                  </div>
+                  <div className="mr-kpi-cell">
+                    <div className="mr-label">RPO</div>
+                    <div className="mr-kpi-val">{pkg.rpo_minutes ?? 3}<small>분</small></div>
+                  </div>
+                </div>
+              </div>
+
+              {pkg.status === 'preparing' && (
+                <div className="mr-preparing">
+                  <div className="mr-preparing-head">
+                    <span className="mr-spinner-sm" />
+                    <span>DR Package 준비 중</span>
+                  </div>
+                  <div className="mr-preparing-list">
+                    <div className="mr-prep-item mr-done"><span className="mr-check">✓</span> GCP Terraform 코드</div>
+                    <div className="mr-prep-item mr-done"><span className="mr-check">✓</span> 컨테이너 이미지</div>
+                    <div className="mr-prep-item"><span className="mr-spin-tiny" /> RDS 스냅샷 Export</div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          <div className="mr-divider" />
+
+          <div className="mr-action-row">
+            <button
+              className="mr-btn mr-btn-secondary mr-flex"
+              onClick={() => router.push(`/projects/${projectId}/mirror/resources`)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <rect x="3" y="3" width="7" height="7" rx="1"/>
+                <rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/>
+                <rect x="14" y="14" width="7" height="7" rx="1"/>
+              </svg>
+              리소스 매핑 현황
+            </button>
+            <button
+              className="mr-btn mr-btn-secondary mr-flex"
+              onClick={() => router.push(`/projects/${projectId}/mirror/package`)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+              </svg>
+              DR 리포트
+            </button>
+            <button
+              className="mr-btn mr-btn-danger mr-flex"
+              onClick={() => drReady && router.push(`/projects/${projectId}/failover`)}
+              disabled={!drReady}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              페일오버 실행
+            </button>
+          </div>
+        </div>
+
+        {/* Sync history */}
+        <div className="mr-section">
+          <div className="mr-section-head">
+            <span className="mr-card-eyebrow">
+              <span className="mr-pip" />
+              동기화 이력
+            </span>
+            {history.length > 0 && (
+              <span className="mr-count">최근 {Math.min(history.length, 5)}건</span>
+            )}
+          </div>
+
+          {history.length === 0 ? (
+            <div className="mr-empty">
+              <div className="mr-empty-mark">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <circle cx="12" cy="12" r="10"/>
+                  <polyline points="12 6 12 12 16 14"/>
+                </svg>
+              </div>
+              <div className="mr-empty-text">동기화 이력이 아직 없습니다.</div>
+            </div>
+          ) : (
+            <table className="mr-table">
+              <thead>
+                <tr>
+                  <th>시각</th>
+                  <th>트리거</th>
+                  <th>상태</th>
+                  <th className="mr-th-right">소요 시간</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.slice(0, 5).map((h) => {
+                  const dur = h.completed_at
+                    ? Math.round(
+                        (new Date(h.completed_at).getTime() - new Date(h.started_at).getTime()) / 1000
+                      )
+                    : null
+                  const tone: 'green' | 'blue' | 'red' =
+                    h.status === 'completed' ? 'green'
+                    : h.status === 'running' ? 'blue'
+                    : 'red'
+                  const label =
+                    h.status === 'completed' ? '완료'
+                    : h.status === 'running' ? '진행 중'
+                    : '실패'
+                  return (
+                    <tr key={h.sync_id}>
+                      <td className="mr-mono mr-cell-dim">
+                        {new Date(h.started_at).toLocaleString('ko-KR')}
+                      </td>
+                      <td className="mr-cell-dim">
+                        {TRIGGER_LABEL[h.trigger_type] ?? h.trigger_type}
+                      </td>
+                      <td>
+                        <span className="mr-status" data-tone={tone}>
+                          <span className="mr-status-pip" />
+                          {label}
+                        </span>
+                      </td>
+                      <td className="mr-mono mr-cell-dim mr-td-right">
+                        {dur !== null ? `${dur}초` : '-'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
+    </>
+  )
+}
 
-      {/* 동기화 이력 */}
-      <div className="bg-[#121214] border border-white/8 rounded-3xl p-6">
-        <p className="text-sm text-[#9ca3af] font-semibold mb-4">동기화 이력</p>
-        {history.length === 0 ? (
-          <p className="text-sm text-[#9ca3af]">동기화 이력이 없습니다.</p>
-        ) : (
-          <div className="space-y-3">
-            {history.slice(0, 5).map((h) => (
-              <div
-                key={h.sync_id}
-                className="flex justify-between items-center text-sm border-b border-white/8 pb-3"
-              >
-                <span className="text-[#9ca3af]">
-                  {new Date(h.started_at).toLocaleString('ko-KR')}
-                </span>
-                <span className="text-[#9ca3af]">
-                  {TRIGGER_LABEL[h.trigger_type] ?? h.trigger_type}
-                </span>
-                <span>
-                  {h.status === 'completed'
-                    ? '✅ 완료'
-                    : h.status === 'running'
-                    ? '⏳ 진행 중'
-                    : '❌ 실패'}
-                </span>
-                <span className="text-xs text-[#9ca3af]">
-                  {h.completed_at
-                    ? `${Math.round(
-                        (new Date(h.completed_at).getTime() -
-                          new Date(h.started_at).getTime()) /
-                          1000
-                      )}초`
-                    : '-'}
-                </span>
-              </div>
-            ))}
-          </div>
+// ─── shared topbar ─────────────────────────────────────────────
+function Topbar({ projectName, onBack }: { projectName?: string; onBack: () => void }) {
+  return (
+    <div className="mr-topbar">
+      <div className="mr-top-left">
+        <span className="mr-brand">
+          <span className="mr-mark" />
+          AutoOps
+        </span>
+        {projectName && (
+          <>
+            <span className="mr-crumb-sep" />
+            <div className="mr-crumb-proj">
+              <span className="mr-crumb-eyebrow">
+                <span className="mr-pip" />
+                MirrorOps · DR
+              </span>
+              <span className="mr-crumb-name">{projectName}</span>
+            </div>
+          </>
         )}
       </div>
+      <button className="mr-back-link" onClick={onBack}>← 대시보드</button>
     </div>
   )
 }
+
+// ─── styles ────────────────────────────────────────────────────
+const styles = `
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+body { background: #0b0e17; color: #edf0f6; }
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, #000 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, #000 30%, transparent 80%);
+  opacity: 0.55; pointer-events: none;
+}
+
+.mr-topbar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 36px;
+  background: rgba(11,14,23,0.85);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.mr-top-left { display: flex; align-items: center; gap: 16px; }
+.mr-brand {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 800; font-size: 16px; letter-spacing: -0.02em;
+  color: #edf0f6;
+}
+.mr-mark {
+  width: 26px; height: 26px;
+  border-radius: 7px;
+  background:
+    radial-gradient(80% 80% at 30% 25%, rgba(255,165,61,0.7), transparent 60%),
+    radial-gradient(80% 80% at 70% 80%, rgba(90,163,255,0.7), transparent 60%),
+    #11151f;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 4px 24px rgba(90,163,255,0.18), inset 0 0 12px rgba(255,255,255,0.06);
+  position: relative; flex-shrink: 0;
+}
+.mr-mark::after {
+  content: ""; position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 9px; height: 9px; border-radius: 2px;
+  background: #fff; box-shadow: 0 0 12px rgba(255,255,255,0.8);
+}
+.mr-crumb-sep {
+  width: 6px; height: 6px; transform: rotate(45deg);
+  border-top: 1px solid #7a8298;
+  border-right: 1px solid #7a8298;
+}
+.mr-crumb-proj { display: flex; flex-direction: column; gap: 2px; }
+.mr-crumb-eyebrow {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: #5aa3ff;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.mr-crumb-eyebrow .mr-pip {
+  background: #5aa3ff !important; box-shadow: 0 0 8px #5aa3ff !important;
+}
+.mr-crumb-name {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 15px;
+  color: #edf0f6; letter-spacing: -0.015em;
+}
+.mr-back-link {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px; color: #aeb4c5;
+  background: rgba(255,255,255,0.03);
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.13);
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms, background 160ms;
+}
+.mr-back-link:hover { color: #edf0f6; border-color: rgba(255,255,255,0.20); background: rgba(255,255,255,0.06); }
+
+.mr-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 36px 80px;
+  color: #edf0f6;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.mr-loading {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase;
+  color: #7a8298;
+}
+.mr-spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: #5aa3ff;
+  animation: mr-spin 700ms linear infinite;
+}
+.mr-spinner-sm {
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.15);
+  border-top-color: #5aa3ff;
+  animation: mr-spin 700ms linear infinite;
+  display: inline-block;
+}
+.mr-spin-tiny {
+  width: 9px; height: 9px; border-radius: 50%;
+  border: 1.5px solid rgba(245,208,97,0.3);
+  border-top-color: #f5d061;
+  animation: mr-spin 700ms linear infinite;
+  display: inline-block;
+}
+@keyframes mr-spin { to { transform: rotate(360deg); } }
+
+.mr-error-block {
+  display: flex; gap: 14px;
+  padding: 20px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,118,118,0.3);
+  background: rgba(255,118,118,0.06);
+  max-width: 500px;
+  margin-top: 24px;
+}
+.mr-error-ico {
+  flex-shrink: 0;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: rgba(255,118,118,0.18);
+  display: grid; place-items: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700; color: #ff7676;
+}
+.mr-error-title { font-weight: 600; font-size: 15px; color: #ff7676; margin-bottom: 4px; }
+.mr-error-msg { font-size: 13px; color: #aeb4c5; line-height: 1.5; margin-bottom: 12px; }
+.mr-mt { margin-top: 8px; }
+
+/* Page head */
+.mr-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 24px; flex-wrap: wrap;
+  margin-bottom: 28px;
+  padding-bottom: 26px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.mr-head-block { flex: 1; min-width: 0; }
+.mr-eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: #5aa3ff;
+  margin-bottom: 14px;
+}
+.mr-pip {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #5aa3ff;
+  box-shadow: 0 0 8px #5aa3ff;
+}
+.mr-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700;
+  font-size: 36px;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  margin: 0 0 12px;
+  color: #edf0f6;
+}
+.mr-sub {
+  font-size: 14.5px;
+  color: #aeb4c5;
+  margin: 0; line-height: 1.55;
+}
+
+/* Buttons */
+.mr-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  padding: 11px 18px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px; font-weight: 600;
+  letter-spacing: -0.005em;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: rgba(255,255,255,0.04);
+  color: #edf0f6;
+  cursor: pointer;
+  transition: background 160ms, border-color 160ms, transform 160ms, box-shadow 160ms;
+}
+.mr-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.20); }
+.mr-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mr-btn-secondary {
+  background: rgba(255,255,255,0.03);
+  color: #aeb4c5;
+}
+.mr-btn-secondary:hover:not(:disabled) { color: #edf0f6; }
+.mr-btn-ghost {
+  background: transparent;
+  border-color: rgba(255,255,255,0.13);
+  color: #aeb4c5;
+}
+.mr-btn-danger {
+  background: linear-gradient(180deg, rgba(255,118,118,0.18), rgba(255,118,118,0.10));
+  border-color: rgba(255,118,118,0.45);
+  color: #ff7676;
+  font-weight: 700;
+}
+.mr-btn-danger:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(255,118,118,0.25), rgba(255,118,118,0.15));
+  border-color: rgba(255,118,118,0.6);
+  box-shadow: 0 0 30px -10px rgba(255,118,118,0.5);
+}
+.mr-flex { flex: 1; }
+.mr-arrow { font-family: 'JetBrains Mono', ui-monospace, monospace; display: inline-block; }
+
+/* Alert */
+.mr-alert {
+  display: flex; gap: 10px; align-items: center;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,118,118,0.3);
+  background: rgba(255,118,118,0.06);
+  color: #ff7676;
+  font-size: 13px; line-height: 1.5;
+  margin-bottom: 20px;
+}
+.mr-alert-ico {
+  flex-shrink: 0; width: 18px; height: 18px;
+  border-radius: 50%; background: rgba(255,118,118,0.18);
+  display: grid; place-items: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700; font-size: 11px;
+}
+
+/* AWS / GCP split cards */
+.mr-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.mr-card {
+  position: relative;
+  padding: 22px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+  overflow: hidden;
+}
+.mr-card::before {
+  content: ""; position: absolute;
+  top: 0; left: 28px; right: 28px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--mr-accent, rgba(255,255,255,0.5)), transparent);
+}
+.mr-card[data-tone="orange"] {
+  --mr-accent: #ffa53d;
+  background:
+    radial-gradient(ellipse 80% 50% at 100% 0%, rgba(255,165,61,0.07), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+}
+.mr-card[data-tone="blue"] {
+  --mr-accent: #5aa3ff;
+  background:
+    radial-gradient(ellipse 80% 50% at 0% 0%, rgba(90,163,255,0.07), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+}
+.mr-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 18px;
+}
+.mr-card-eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--mr-accent, #5aa3ff);
+}
+.mr-card-eyebrow .mr-pip { background: var(--mr-accent, #5aa3ff); box-shadow: 0 0 8px var(--mr-accent, #5aa3ff); }
+.mr-region {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; color: #7a8298;
+  letter-spacing: 0.06em;
+}
+.mr-card-row {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+}
+.mr-stat-num {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 28px;
+  letter-spacing: -0.025em;
+  color: #edf0f6;
+  line-height: 1;
+}
+.mr-stat-num small {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 12px;
+  color: #7a8298;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+/* Status pip / label */
+.mr-status {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13.5px; font-weight: 500;
+  color: #aeb4c5;
+}
+.mr-status-lg { font-size: 16px; font-weight: 600; }
+.mr-status .mr-status-pip { width: 7px; height: 7px; border-radius: 50%; }
+.mr-status-lg .mr-status-pip { width: 8px; height: 8px; }
+.mr-status[data-tone="green"]  { color: #6ee7a0; }
+.mr-status[data-tone="green"] .mr-status-pip  { background: #6ee7a0; box-shadow: 0 0 8px #6ee7a0; }
+.mr-status[data-tone="blue"]   { color: #5aa3ff; }
+.mr-status[data-tone="blue"] .mr-status-pip   { background: #5aa3ff; box-shadow: 0 0 8px #5aa3ff; animation: mr-pulse 1.6s ease-in-out infinite; }
+.mr-status[data-tone="red"]    { color: #ff7676; }
+.mr-status[data-tone="red"] .mr-status-pip    { background: #ff7676; box-shadow: 0 0 8px #ff7676; }
+.mr-status[data-tone="yellow"] { color: #f5d061; }
+.mr-status[data-tone="yellow"] .mr-status-pip { background: #f5d061; box-shadow: 0 0 8px #f5d061; }
+.mr-status[data-tone="orange"] { color: #ffa53d; }
+.mr-status[data-tone="orange"] .mr-status-pip { background: #ffa53d; box-shadow: 0 0 8px #ffa53d; animation: mr-pulse 1.6s ease-in-out infinite; }
+.mr-status[data-tone="mute"] .mr-status-pip { background: #7a8298; }
+@keyframes mr-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.85); }
+}
+
+/* Section */
+.mr-section {
+  padding: 24px 26px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+  margin-bottom: 18px;
+}
+.mr-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 18px;
+}
+.mr-count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; color: #7a8298;
+  letter-spacing: 0.1em;
+  padding: 4px 10px;
+  border-radius: 100px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: rgba(255,255,255,0.04);
+}
+
+.mr-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: #7a8298;
+  margin-bottom: 8px;
+}
+.mr-value {
+  font-size: 13px;
+  color: #edf0f6;
+  font-weight: 500;
+}
+.mr-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.mr-text-right { text-align: right; }
+
+.mr-status-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 18px; flex-wrap: wrap;
+}
+.mr-divider {
+  height: 1px;
+  background: rgba(255,255,255,0.08);
+  margin: 20px 0;
+}
+
+.mr-pkg-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 18px; flex-wrap: wrap;
+}
+.mr-kpi-pair {
+  display: flex; gap: 24px;
+}
+.mr-kpi-cell {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+}
+.mr-kpi-val {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 22px;
+  letter-spacing: -0.02em;
+  color: #6ee7a0;
+  line-height: 1;
+}
+.mr-kpi-val small {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 11px;
+  color: #7a8298;
+  font-weight: 500;
+  margin-left: 3px;
+}
+
+/* Preparing block */
+.mr-preparing {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(245,208,97,0.22);
+  background: rgba(245,208,97,0.05);
+}
+.mr-preparing-head {
+  display: flex; align-items: center; gap: 10px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 600; font-size: 13.5px;
+  color: #f5d061;
+  margin-bottom: 10px;
+}
+.mr-preparing-list {
+  display: flex; flex-direction: column; gap: 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+.mr-prep-item {
+  display: flex; align-items: center; gap: 8px;
+  color: rgba(245,208,97,0.7);
+}
+.mr-prep-item.mr-done { color: #6ee7a0; }
+.mr-check {
+  width: 14px; height: 14px; border-radius: 50%;
+  display: inline-grid; place-items: center;
+  background: rgba(110,231,160,0.18);
+  font-size: 10px; font-weight: 700;
+}
+
+.mr-action-row {
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+
+/* Empty */
+.mr-empty {
+  padding: 40px 24px;
+  text-align: center;
+}
+.mr-empty-mark {
+  width: 44px; height: 44px;
+  margin: 0 auto 12px;
+  border-radius: 11px;
+  border: 1px dashed rgba(255,255,255,0.20);
+  display: grid; place-items: center;
+  color: #7a8298;
+}
+.mr-empty-text { font-size: 13px; color: #aeb4c5; }
+
+/* History table */
+.mr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.mr-table thead th {
+  text-align: left;
+  padding: 12px 14px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: #aeb4c5;
+  background: rgba(255,255,255,0.025);
+  border-bottom: 1px solid rgba(255,255,255,0.13);
+  border-radius: 0;
+}
+.mr-table thead th:first-child { padding-left: 18px; border-top-left-radius: 10px; }
+.mr-table thead th:last-child { padding-right: 18px; border-top-right-radius: 10px; }
+.mr-th-right { text-align: right !important; }
+.mr-table tbody td {
+  padding: 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  vertical-align: middle;
+}
+.mr-table tbody td:first-child { padding-left: 18px; }
+.mr-table tbody td:last-child  { padding-right: 18px; }
+.mr-table tbody tr:last-child td { border-bottom: none; }
+.mr-cell-dim { color: #aeb4c5; }
+.mr-td-right { text-align: right; }
+
+@media (max-width: 900px) {
+  .mr-topbar { padding: 14px 20px; }
+  .mr-top-left .mr-crumb-sep, .mr-top-left .mr-crumb-proj { display: none; }
+  .mr-page { padding: 28px 20px 60px; }
+  .mr-title { font-size: 28px; }
+  .mr-split { grid-template-columns: 1fr; }
+  .mr-status-row, .mr-pkg-row { flex-direction: column; align-items: flex-start; }
+  .mr-text-right { text-align: left; }
+  .mr-kpi-pair { gap: 20px; }
+  .mr-kpi-cell { align-items: flex-start; }
+  .mr-action-row { flex-direction: column; }
+}
+`

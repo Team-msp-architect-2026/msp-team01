@@ -604,7 +604,7 @@ export default function DashboardPage() {
                       key={p.project_id}
                       onClick={() => {
                         if (isConfirmingDelete) return
-                        router.push(`/projects/${p.project_id}`)
+                        router.push(`/projects/${p.project_id}/mirror`)
                       }}
                     >
                       <td>
