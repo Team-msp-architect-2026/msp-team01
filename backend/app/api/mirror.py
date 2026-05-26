@@ -57,7 +57,8 @@ def get_dr_status(
                 AWSResource.project_id == project_id
             ).count(),
             "gcp_resource_count": db.query(GCPMapping).filter(
-                GCPMapping.project_id == project_id
+                GCPMapping.project_id == project_id,
+                GCPMapping.confidence.in_(['auto', 'review']),
             ).count(),
             "dr_package": {
                 "status":          latest_package.status          if latest_package else None,
@@ -278,7 +279,7 @@ def failover(
     latest_package = None
 
     if body.mode == "actual":
-        expected_name = f"{project.prefix}-{project.environment}"
+        expected_name = project.name
         if body.confirm_project_name != expected_name:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -477,7 +478,7 @@ async def _run_failover_actual(
         except Exception:
             pass
 
-    def _update_status(new_status: str, error_msg: str = "", rto_seconds: int = None):
+    def _update_status(new_status: str, error_msg: str = "", rto_seconds: int = None, resources_created: int = None):
         fh = db.query(FailoverHistory).filter(
             FailoverHistory.failover_id == failover_id
         ).first()
@@ -487,8 +488,9 @@ async def _run_failover_actual(
             if error_msg:
                 fh.error_message = error_msg
             if rto_seconds is not None:
-                fh.actual_rto_seconds    = rto_seconds
-                fh.gcp_resources_created = 11
+                fh.actual_rto_seconds = rto_seconds
+            if resources_created is not None:
+                fh.gcp_resources_created = resources_created
             db.commit()
 
     try:
@@ -548,6 +550,9 @@ async def _run_failover_actual(
         _log("terraform apply 실행 중 (GCP 리소스 생성 시작)...")
         _log("Cloud SQL 생성에 약 10~15분 소요됩니다.")
 
+        import re as _re
+        resources_created = 0
+
         apply_proc = subprocess.Popen(
             ["terraform", "apply", "-auto-approve", "-no-color", "-json"],
             cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -563,10 +568,14 @@ async def _run_failover_actual(
                 msg   = event.get("@message", "")
                 if msg:
                     _log(msg)
+                    if "Apply complete!" in msg:
+                        match = _re.search(r'(\d+) added', msg)
+                        if match:
+                            resources_created = int(match.group(1))
             except json.JSONDecodeError:
                 _log(line)
 
-        apply_proc.wait(timeout=1200)  # 최대 20분
+        apply_proc.wait(timeout=1200)
         if apply_proc.returncode != 0:
             raise RuntimeError(f"terraform apply 실패 (exit code {apply_proc.returncode})")
 
@@ -587,7 +596,7 @@ async def _run_failover_actual(
         # ⑥ RTO 계산 및 DB 업데이트
         rto_seconds = int((datetime.utcnow() - started_at).total_seconds())
         _log(f"실제 RTO: {rto_seconds // 60}분 {rto_seconds % 60}초")
-        _update_status("completed", rto_seconds=rto_seconds)
+        _update_status("completed", rto_seconds=rto_seconds, resources_created=resources_created)
 
     except Exception as e:
         err_msg = str(e)
@@ -882,7 +891,7 @@ async def _run_failover_destroy(
         except Exception:
             pass
 
-    def _update_status(new_status: str, error_msg: str = ""):
+    def _update_status(new_status: str, error_msg: str = "", rto_seconds: int = None, resources_created: int = None):
         fh = db.query(FailoverHistory).filter(
             FailoverHistory.failover_id == failover_id
         ).first()
@@ -891,6 +900,10 @@ async def _run_failover_destroy(
             fh.completed_at = datetime.utcnow()
             if error_msg:
                 fh.error_message = error_msg
+            if rto_seconds is not None:
+                fh.actual_rto_seconds    = rto_seconds
+            if resources_created is not None:
+                fh.gcp_resources_created = resources_created
             db.commit()
 
     try:
@@ -969,3 +982,35 @@ async def _run_failover_destroy(
         if work_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
         db.close()
+
+# ── GET /api/mirror/{project_id}/failover-history ──────────────────
+
+@router.get("/{project_id}/failover-history")
+def get_failover_history(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_project_or_404(project_id, current_user.user_id, db)
+
+    history = db.query(FailoverHistory).filter(
+        FailoverHistory.project_id == project_id,
+    ).order_by(FailoverHistory.started_at.desc()).limit(10).all()
+
+    return {
+        "success": True,
+        "data": [
+            {
+                "failover_id":           fh.failover_id,
+                "mode":                  fh.mode,
+                "status":                fh.status,
+                "gcp_region":            fh.gcp_region,
+                "gcp_resources_created": fh.gcp_resources_created,
+                "actual_rto_seconds":    fh.actual_rto_seconds,
+                "error_message":         fh.error_message,
+                "started_at":            fh.started_at.isoformat(),
+                "completed_at":          fh.completed_at.isoformat() if fh.completed_at else None,
+            }
+            for fh in history
+        ],
+    }

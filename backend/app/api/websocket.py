@@ -18,21 +18,10 @@ async def websocket_events(
     websocket: WebSocket,
     project_id: str,
     deployment_id: str = Query(None),
-    failover_id: str   = Query(None), 
+    failover_id: str   = Query(None),
 ):
-    """
-    CloudWatch Logs를 2초 간격으로 폴링해 배포 로그를 실시간 스트리밍한다.
-    §7-7 WebSocket 서버 구현 방식: CloudWatch Polling (2초 간격)
-
-    §7-7 Log Group 명명 규칙:
-    /autoops/terraform-runner/{deployment_id}  ← CraftOps apply 로그
-
-    §7-7 이벤트 공통 포맷:
-    { "event_type": "...", "project_id": "...", "timestamp": "...", "data": {...} }
-    """
     await websocket.accept()
 
-    # failover_id가 있으면 페일오버 로그 스트리밍 분기
     if failover_id:
         await _stream_failover_logs(websocket, project_id, failover_id)
         return
@@ -41,7 +30,7 @@ async def websocket_events(
         await websocket.send_json({
             "event_type": "error",
             "project_id": project_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
             "data": {"message": "deployment_id가 필요합니다."},
         })
         await websocket.close()
@@ -52,7 +41,6 @@ async def websocket_events(
 
     try:
         while True:
-            # 항상 CloudWatch 폴링
             try:
                 streams = cw.describe_log_streams(
                     logGroupName=log_group,
@@ -67,7 +55,7 @@ async def websocket_events(
                         "logGroupName":  log_group,
                         "logStreamName": log_streams[0]["logStreamName"],
                         "startFromHead": True,
-                        "limit": 100,
+                        "limit":         100,
                     }
                     if next_token:
                         kwargs["nextToken"] = next_token
@@ -87,11 +75,9 @@ async def websocket_events(
                                 "timestamp":     event["timestamp"],
                             },
                         })
-
-            except cw.exceptions.ResourceNotFoundException:
+            except Exception:
                 pass
 
-            # ── 배포 완료/실패 여부 DB 체크 (매 polling 시) ──────────
             db: Session = SessionLocal()
             try:
                 deployment = db.query(Deployment).filter(
@@ -157,19 +143,16 @@ async def websocket_events(
         except Exception:
             pass
 
+
 # ── MirrorOps WebSocket ─────────────────────────────────────────────
 
 @router.websocket("/ws/mirror/{project_id}")
 async def websocket_mirror_events(
     websocket: WebSocket,
     project_id: str,
-    sync_id: str = Query(None),
+    sync_id: str     = Query(None),
     failover_id: str = Query(None),
 ):
-    """
-    MirrorOps 동기화 및 페일오버 진행 상황을 실시간 스트리밍한다.
-    DB 폴링 방식 (2초 간격)
-    """
     await websocket.accept()
 
     if not sync_id and not failover_id:
@@ -186,7 +169,6 @@ async def websocket_mirror_events(
         while True:
             db: Session = SessionLocal()
             try:
-                # ── 동기화 이벤트 ──
                 if sync_id:
                     from app.models.sync_history import SyncHistory
                     sync = db.query(SyncHistory).filter(
@@ -231,7 +213,6 @@ async def websocket_mirror_events(
                             })
                             break
 
-                # ── 페일오버 이벤트 ──
                 if failover_id:
                     from app.models.failover_history import FailoverHistory
                     fh = db.query(FailoverHistory).filter(
@@ -244,8 +225,8 @@ async def websocket_mirror_events(
                             "project_id": project_id,
                             "timestamp":  datetime.now(timezone.utc).isoformat(),
                             "data": {
-                                "failover_id":         failover_id,
-                                "status":              fh.status,
+                                "failover_id":           failover_id,
+                                "status":                fh.status,
                                 "gcp_resources_created": fh.gcp_resources_created,
                             },
                         })
@@ -256,9 +237,9 @@ async def websocket_mirror_events(
                                 "project_id": project_id,
                                 "timestamp":  datetime.now(timezone.utc).isoformat(),
                                 "data": {
-                                    "failover_id":         failover_id,
+                                    "failover_id":           failover_id,
                                     "gcp_resources_created": fh.gcp_resources_created,
-                                    "actual_rto_seconds":  fh.actual_rto_seconds,
+                                    "actual_rto_seconds":    fh.actual_rto_seconds,
                                 },
                             })
                             break
@@ -298,23 +279,20 @@ async def websocket_mirror_events(
         except Exception:
             pass
 
-# backend/app/api/websocket.py — 파일 하단에 추가
+
+# ── Failover 로그 스트리밍 ─────────────────────────────────────────
 
 async def _stream_failover_logs(
     websocket: WebSocket,
     project_id: str,
     failover_id: str,
 ) -> None:
-    """
-    /autoops/failover/{failover_id} CloudWatch 로그를 2초 polling.
-    failover_history.status가 completed/failed가 되면 종료.
-    """
     log_group  = f"/autoops/failover/{failover_id}"
     next_token = None
 
     try:
         while True:
-            # CloudWatch 로그 폴링
+            # ── CloudWatch 로그 즉시 폴링 (초기 대기 없음) ────────────
             try:
                 streams = cw.describe_log_streams(
                     logGroupName = log_group,
@@ -339,30 +317,35 @@ async def _stream_failover_logs(
                     next_token = resp.get("nextForwardToken")
 
                     for event in events:
+                        msg = event.get("message", "").strip()
+                        if not msg:
+                            continue
                         await websocket.send_json({
                             "event_type": "failover_progress",
                             "project_id": project_id,
                             "timestamp":  datetime.now(timezone.utc).isoformat(),
                             "data": {
                                 "failover_id":      failover_id,
-                                "current_resource": event["message"],
+                                "current_resource": msg,
                                 "elapsed_seconds":  0,
                             },
                         })
 
-            except cw.exceptions.ResourceNotFoundException:
-                pass  # 로그 그룹 아직 생성 안 됨
+            except Exception:
+                # 로그 그룹 미생성, 일시 오류 등 — 무시하고 계속 폴링
+                pass
 
-            # DB에서 완료 여부 체크
+            # ── DB 완료 여부 체크 ──────────────────────────────────
             db: Session = SessionLocal()
             try:
                 from app.models.failover_history import FailoverHistory
                 fh = db.query(FailoverHistory).filter(
                     FailoverHistory.failover_id == failover_id
                 ).first()
-                current_status = fh.status if fh else None
-                rto_seconds    = fh.actual_rto_seconds if fh else None
+                current_status = fh.status                if fh else None
+                rto_seconds    = fh.actual_rto_seconds    if fh else None
                 gcp_created    = fh.gcp_resources_created if fh else None
+                error_msg      = fh.error_message         if fh else None
             finally:
                 db.close()
 
@@ -372,7 +355,7 @@ async def _stream_failover_logs(
                     "project_id": project_id,
                     "timestamp":  datetime.now(timezone.utc).isoformat(),
                     "data": {
-                        "failover_id":          failover_id,
+                        "failover_id":           failover_id,
                         "gcp_resources_created": gcp_created,
                         "actual_rto_seconds":    rto_seconds,
                     },
@@ -380,21 +363,13 @@ async def _stream_failover_logs(
                 break
 
             elif current_status == "failed":
-                db2 = SessionLocal()
-                try:
-                    from app.models.failover_history import FailoverHistory as FH2
-                    fh2 = db2.query(FH2).filter(FH2.failover_id == failover_id).first()
-                    err = fh2.error_message if fh2 else "알 수 없는 오류"
-                finally:
-                    db2.close()
-
                 await websocket.send_json({
                     "event_type": "failover_failed",
                     "project_id": project_id,
                     "timestamp":  datetime.now(timezone.utc).isoformat(),
                     "data": {
                         "failover_id":   failover_id,
-                        "error_message": err,
+                        "error_message": error_msg or "알 수 없는 오류",
                     },
                 })
                 break

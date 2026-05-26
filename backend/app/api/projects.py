@@ -28,13 +28,46 @@ def list_projects(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from sqlalchemy import func
+    from app.models.aws_resource import AWSResource
+    from app.models.gcp_mapping import GCPMapping
+
     query = db.query(Project).filter(Project.user_id == current_user.user_id)
     if status:
         query = query.filter(Project.status == status)
     if environment:
         query = query.filter(Project.environment == environment)
     projects = query.order_by(Project.created_at.desc()).all()
-    return {"success": True, "data": [_project_to_dict(p) for p in projects]}
+
+    project_ids = [p.project_id for p in projects]
+
+    # AWS count — 전체
+    aws_counts = dict(
+        db.query(AWSResource.project_id, func.count(AWSResource.resource_id))
+        .filter(AWSResource.project_id.in_(project_ids))
+        .group_by(AWSResource.project_id)
+        .all()
+    ) if project_ids else {}
+
+    # GCP count — auto + review (not_required 제외)
+    gcp_counts = dict(
+        db.query(GCPMapping.project_id, func.count(GCPMapping.resource_id))
+        .filter(
+            GCPMapping.project_id.in_(project_ids),
+            GCPMapping.confidence.in_(['auto', 'review']),
+        )
+        .group_by(GCPMapping.project_id)
+        .all()
+    ) if project_ids else {}
+
+    result = []
+    for p in projects:
+        d = _project_to_dict(p)
+        d['aws_resource_count'] = aws_counts.get(p.project_id, 0)
+        d['gcp_resource_count'] = gcp_counts.get(p.project_id, 0)
+        result.append(d)
+
+    return {"success": True, "data": result}
 
 
 @router.post("", status_code=201)
