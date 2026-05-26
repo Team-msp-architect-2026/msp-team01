@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import { useResourceMappings } from '@/hooks/useMirrorOps'
 import { ResourceMapping, Confidence } from '@/types/mirror'
 import { Button } from '@/components/ui/button'
@@ -73,6 +73,7 @@ const BADGE_VARIANT: Record<ExtendedConfidence, string> = {
 
 export default function ResourceMappingsPage() {
   const params = useParams()
+  const router = useRouter()
   const projectId = params.id as string
 
   const { data: mappings, isLoading, error } = useResourceMappings(projectId)
@@ -147,6 +148,13 @@ export default function ResourceMappingsPage() {
 
         {/* ── Page header ────────────────────────────── */}
         <header className="mr-page-header">
+          <button
+            onClick={() => router.push(`/projects/${projectId}/mirror`)}
+            className="mr-back"
+          >
+            <span className="mr-back-arrow">←</span>
+            대시보드
+          </button>
           <div className="mr-eyebrow">
             <span className="mr-pip" />
             MirrorOps · AWS → GCP
@@ -434,6 +442,18 @@ export default function ResourceMappingsPage() {
 const styles = `
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
+body { background: #0b0e17; color: #edf0f6; }
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, #000 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, #000 30%, transparent 80%);
+  opacity: 0.55; pointer-events: none;
+}
+
 .mr-page {
   font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
   color: #edf0f6;
@@ -460,7 +480,22 @@ const styles = `
 @keyframes mr-spin { to { transform: rotate(360deg); } }
 
 /* ── Page header ─────────────────────────────────── */
-.mr-page-header { margin-bottom: 28px; }
+.mr-page-header { margin-bottom: 28px; display: flex; flex-direction: column; gap: 4px; }
+.mr-back {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 8px;
+  background: none; border: none;
+  color: #aeb4c5;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px; font-weight: 500;
+  cursor: pointer;
+  padding: 6px 0;
+  margin-bottom: 10px;
+  transition: color 160ms;
+}
+.mr-back:hover { color: #edf0f6; }
+.mr-back:hover .mr-back-arrow { transform: translateX(-3px); }
+.mr-back-arrow { transition: transform 200ms; display: inline-block; }
 .mr-eyebrow {
   display: inline-flex; align-items: center; gap: 10px;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
