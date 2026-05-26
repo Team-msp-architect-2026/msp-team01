@@ -13,9 +13,13 @@ class HCLGenerator:
 
     v2: Gemini API 호출 제거 → Python 템플릿 기반 HCL 생성으로 전환
     v3: validate용(include_backend=False) / deploy용(include_backend=True) 분리
-        - validate용: backend 블록 없음 → plan.add 정상 출력 (30개)
+        - validate용: backend 블록 없음 → plan.add 정상 출력
         - deploy용:   backend 블록 포함 → S3 state 정상 저장
+    v4: config_snapshot 필수 키 검증 추가
+        random provider 추가 (RDS 패스워드 random_id 사용)
     """
+
+    REQUIRED_KEYS = {"project_id", "prefix", "environment", "region"}
 
     def __init__(self):
         pass
@@ -26,6 +30,7 @@ class HCLGenerator:
         validator.py에서 호출.
         반환: (hcl_code, work_dir)
         """
+        self._validate_snapshot(config_snapshot)
         hcl_code   = template_generate_hcl(config_snapshot, include_backend=False)
         project_id = config_snapshot.get("project_id", "unknown")
         work_dir   = tempfile.mkdtemp(prefix=f"autoops-{project_id[:8]}-")
@@ -38,6 +43,7 @@ class HCLGenerator:
         craft.py의 deploy 엔드포인트에서 호출.
         반환: hcl_code (S3 업로드용)
         """
+        self._validate_snapshot(config_snapshot)
         return template_generate_hcl(config_snapshot, include_backend=True)
 
     def write_to_dir(self, hcl_code: str, work_dir: str) -> None:
@@ -48,3 +54,34 @@ class HCLGenerator:
         """Validation 완료 후 임시 디렉토리를 정리한다."""
         if work_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    # ── Private 헬퍼 ────────────────────────────────────────────────
+
+    def _validate_snapshot(self, config_snapshot: dict) -> None:
+        """
+        config_snapshot 필수 키 존재 여부를 검증한다.
+        누락된 키가 있으면 ValueError를 발생시킨다.
+        """
+        missing = self.REQUIRED_KEYS - set(config_snapshot.keys())
+        if missing:
+            raise ValueError(
+                f"config_snapshot 필수 키 누락: {sorted(missing)}"
+            )
+
+    def _write_providers(self, work_dir: str) -> None:
+        """
+        random provider 설정 파일을 작업 디렉토리에 생성한다.
+        hcl_template.py의 random_id 리소스(RDS 패스워드)가 이 provider를 필요로 한다.
+        """
+        providers_hcl = """terraform {
+  required_providers {
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+  }
+}
+"""
+        (Path(work_dir) / "providers.tf").write_text(
+            providers_hcl, encoding="utf-8"
+        )

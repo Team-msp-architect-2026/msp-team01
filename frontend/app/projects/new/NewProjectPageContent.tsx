@@ -29,6 +29,7 @@ export default function NewProjectPageContent() {
   const [namingPreview, setNamingPreview]   = useState<string[]>([])
   const [stepConfigs, setStepConfigs]       = useState<Record<string, Record<string, unknown>>>({})
   const [cidrError, setCidrError]           = useState('')
+  const [recommendedConfig, setRecommendedConfig] = useState<Record<string, unknown>>({})
 
   const validateCIDR = (cidr: string): boolean => {
     const cidrRegex = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/
@@ -266,8 +267,12 @@ export default function NewProjectPageContent() {
 
             <div className="npc-form-card">
               <IntentAnalysis
-                projectId={projectId}
-                onComplete={() => setPhase('2-1')}
+                projectId={projectId!}
+                environment={projectForm.environment}
+                onComplete={(result) => {
+                 setRecommendedConfig(result.recommended_config)
+                  setPhase('2-1')
+                }}
               />
             </div>
           </div>
@@ -526,6 +531,8 @@ export default function NewProjectPageContent() {
 
   // ── phase: 2-5 ECS ────────────────────────────────────────────
   if (phase === '2-5') {
+      const ecsVcpu   = (recommendedConfig as Record<string, Record<string, number>>)?.ecs?.vcpu ?? 1
+      const ecsMemory = (recommendedConfig as Record<string, Record<string, number>>)?.ecs?.memory ?? 2048
     return (
       <>
         <style>{styles}</style>
@@ -545,10 +552,11 @@ export default function NewProjectPageContent() {
           onPrev={() => setPhase('2-4')}
           onNext={() =>
             handleSaveStep('2-5', {
-              vcpu:            1,
-              memory:          2048,
-              container_image: (stepConfigs['2-5']?.container_image as string) || DEFAULT_CONTAINER_IMAGE,
-            })
+            vcpu:               ecsVcpu,
+            memory:             ecsMemory,
+            container_image:    (stepConfigs['2-5']?.container_image as string) || DEFAULT_CONTAINER_IMAGE,
+            recommended_config: recommendedConfig,
+          })
           }
           isSubmitting={isSubmitting}
         >
@@ -556,13 +564,13 @@ export default function NewProjectPageContent() {
             <div className="npc-field">
               <label className="npc-label">vCPU (고정)</label>
               <div className="npc-input-wrap npc-readonly">
-                <input className="npc-input npc-mono" defaultValue="1" readOnly />
+                <input className="npc-input npc-mono" value={`${ecsVcpu} vCPU`} readOnly />
               </div>
             </div>
             <div className="npc-field">
               <label className="npc-label">메모리 (고정)</label>
               <div className="npc-input-wrap npc-readonly">
-                <input className="npc-input npc-mono" defaultValue="2048 MB" readOnly />
+                <input className="npc-input npc-mono" value={`${ecsMemory} MB`} readOnly />
               </div>
             </div>
           </div>
@@ -594,6 +602,9 @@ export default function NewProjectPageContent() {
 
   // ── phase: 2-6 RDS ────────────────────────────────────────────
   if (phase === '2-6') {
+    const rdsInstanceClass = (recommendedConfig as Record<string, Record<string, string>>)?.rds?.instance_class
+      ?? (isProd ? 'db.t3.medium' : 'db.t3.micro')
+
     return (
       <>
         <style>{styles}</style>
@@ -612,7 +623,9 @@ export default function NewProjectPageContent() {
           }
           onPrev={() => setPhase('2-5')}
           onNext={async () => {
-            await handleSaveStep('2-6', {})
+            await handleSaveStep('2-6', {
+              recommended_config: recommendedConfig,
+            })
             setPhase('summary')
           }}
           isSubmitting={isSubmitting}
@@ -626,7 +639,7 @@ export default function NewProjectPageContent() {
               </div>
               <div className="npc-sg-row">
                 <div className="npc-sg-key">인스턴스</div>
-                <div className="npc-sg-val npc-mono">{isProd ? 'db.t3.medium' : 'db.t3.micro'}</div>
+                <div className="npc-sg-val npc-mono">{rdsInstanceClass}</div>
               </div>
               <div className="npc-sg-row">
                 <div className="npc-sg-key">Multi-AZ</div>
@@ -666,6 +679,12 @@ export default function NewProjectPageContent() {
     const vpcCidr        = (stepConfigs['2-2']?.vpc_cidr as string) || '10.0.0.0/16'
     const albName        = `${projectForm.prefix}-${projectForm.environment}-alb`
     const containerImage = (stepConfigs['2-5']?.container_image as string) || DEFAULT_CONTAINER_IMAGE
+    const rdsInstanceClass = (recommendedConfig as Record<string, Record<string, string>>)?.rds?.instance_class
+      ?? (isProd ? 'db.t3.medium' : 'db.t3.micro')
+    const ecsVcpu   = (recommendedConfig as Record<string, Record<string, number>>)?.ecs?.vcpu ?? 1
+    const ecsMemory = (recommendedConfig as Record<string, Record<string, number>>)?.ecs?.memory ?? 2048
+    const ecsMaxTasks   = (recommendedConfig as Record<string, Record<string, Record<string, number>>>)?.ecs?.autoscaling?.max ?? (isProd ? 10 : 3)
+    const ecsTargetCpu  = (recommendedConfig as Record<string, Record<string, Record<string, number>>>)?.ecs?.autoscaling?.target_cpu ?? 70
 
     return (
       <>
@@ -756,10 +775,10 @@ export default function NewProjectPageContent() {
                   <div className="npc-sum-sub">앱 서버</div>
                 </div>
                 <div className="npc-sum-rows">
-                  <div className="npc-sum-row"><span>vCPU / 메모리</span><span className="npc-mono">1 vCPU · 2048 MB</span></div>
+                  <div className="npc-sum-row"><span>vCPU / 메모리</span><span className="npc-mono">{ecsVcpu} vCPU · {ecsMemory} MB</span></div>
                   <div className="npc-sum-row"><span>이미지</span><span className="npc-mono npc-break">{containerImage}</span></div>
                   <div className="npc-sum-row"><span>최소 태스크</span><span className="npc-mono">{isProd ? '2 (고가용성)' : '1'}</span></div>
-                  <div className="npc-sum-row"><span>오토스케일링</span><span className="npc-mono">{isProd ? 'ON · CPU 70%' : 'OFF'}</span></div>
+                  <div className="npc-sum-row"><span>오토스케일링</span><span className="npc-mono">{isProd ? `ON · CPU ${ecsTargetCpu}% · 최대 ${ecsMaxTasks}` : 'OFF'}</span></div>
                 </div>
               </div>
 
@@ -771,7 +790,7 @@ export default function NewProjectPageContent() {
                   <div className="npc-sum-sub">데이터베이스</div>
                 </div>
                 <div className="npc-sum-rows">
-                  <div className="npc-sum-row"><span>인스턴스</span><span className="npc-mono">{isProd ? 'db.t3.medium' : 'db.t3.micro'}</span></div>
+                  <div className="npc-sum-row"><span>인스턴스</span><span className="npc-mono">{rdsInstanceClass}</span></div>
                   <div className="npc-sum-row"><span>Multi-AZ</span><span className="npc-mono">{isProd ? 'ON' : 'OFF'}</span></div>
                   <div className="npc-sum-row"><span>백업 보존</span><span className="npc-mono">{isProd ? '30일' : '0일'}</span></div>
                   <div className="npc-sum-row"><span>암호화</span><span className="npc-mono">{isProd ? 'ON' : 'OFF'}</span></div>

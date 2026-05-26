@@ -1,12 +1,9 @@
 # backend/app/services/craftops/dag_engine.py
+from __future__ import annotations
 
 # MVP 16개 리소스 의존성 맵
 # 기술참조문서 §4-2 Python 의존성 맵 구조 기준
-# requires: 반드시 완료되어야 하는 선행 리소스
-# optional: 있으면 자동 연결되는 선택적 리소스
-# wizard_step: 해당 리소스가 설정되는 위저드 단계
 DEPENDENCY_MAP: dict[str, dict] = {
-    # §4-2 명시 항목
     "aws_vpc": {
         "requires": [],
         "optional": [],
@@ -14,39 +11,38 @@ DEPENDENCY_MAP: dict[str, dict] = {
         "label": "VPC",
     },
     "aws_subnet": {
-        "requires": ["aws_vpc"],          # §4-2: aws_subnet requires aws_vpc
+        "requires": ["aws_vpc"],
         "optional": [],
         "wizard_step": "2-2",
         "label": "Subnet",
     },
     "aws_security_group": {
-        "requires": ["aws_vpc"],          # §4-2: aws_security_group requires aws_vpc
+        "requires": ["aws_vpc"],
         "optional": [],
         "wizard_step": "2-3",
         "label": "Security Group (ALB / App / DB)",
     },
     "aws_lb": {
-        "requires": ["aws_vpc", "aws_subnet", "aws_security_group"],  # §4-2
+        "requires": ["aws_vpc", "aws_subnet", "aws_security_group"],
         "optional": [],
         "wizard_step": "2-4",
         "label": "ALB",
     },
     "aws_ecs_service": {
-        "requires": [                     # §4-2
+        "requires": [
             "aws_vpc", "aws_subnet", "aws_security_group",
             "aws_ecs_cluster", "aws_ecs_task_definition",
         ],
-        "optional": ["aws_lb_target_group", "aws_cloudwatch_log_group"],  # §4-2
+        "optional": ["aws_lb_target_group", "aws_cloudwatch_log_group"],
         "wizard_step": "2-5",
         "label": "ECS Service",
     },
     "aws_db_instance": {
-        "requires": ["aws_vpc", "aws_db_subnet_group", "aws_security_group"],  # §4-2
-        "optional": ["aws_kms_key"],      # §4-2
+        "requires": ["aws_vpc", "aws_db_subnet_group", "aws_security_group"],
+        "optional": ["aws_kms_key"],
         "wizard_step": "2-6",
         "label": "RDS Instance (PostgreSQL)",
     },
-    # 의존성 트리(§4-2)에서 도출한 추가 항목
     "aws_internet_gateway": {
         "requires": ["aws_vpc"],
         "optional": [],
@@ -124,12 +120,35 @@ STEP_RESOURCES: dict[str, list[str]] = {
     "2-6": ["aws_db_subnet_group", "aws_db_instance", "aws_kms_key"],
 }
 
+# environment 정규화 맵
+# projects 테이블: "production" / "staging" / "development"
+# dag_engine 내부: "production" / "staging" / "development" 통일
+_ENV_NORMALIZE: dict[str, str] = {
+    "prod":        "production",
+    "production":  "production",
+    "stage":       "staging",
+    "staging":     "staging",
+    "dev":         "development",
+    "development": "development",
+}
+
+
+def _normalize_env(environment: str) -> str:
+    """environment 값을 정규화한다. 알 수 없는 값은 'production'으로 처리."""
+    return _ENV_NORMALIZE.get(environment.lower(), "production")
+
 
 class DAGEngine:
     """
     16개 AWS 리소스 간 의존성을 관리한다.
     위저드 각 단계에서 선행 리소스 완료 여부를 검사하고 (FR-A-004),
     환경별 Context-Aware 값을 자동으로 계산한다. (FR-A-005)
+
+    v2 변경:
+    - _get_ecs_preset / _get_rds_preset이 Gemini 추론값을 우선 적용
+    - 환경 프리셋은 Gemini가 추론하지 않는 보안·운영 기준값만 담당
+    - environment 정규화 처리 추가 (prod → production 등)
+    - create_initial_deployment 분리 → deployment_service.py로 이동
     """
 
     def get_dependency_tree(self) -> dict:
@@ -148,9 +167,8 @@ class DAGEngine:
         if step not in step_order:
             return False
 
-        step_index = step_order.index(step)
-        required_steps = step_order[:step_index]  # 현재 단계 이전 모든 단계
-
+        step_index     = step_order.index(step)
+        required_steps = step_order[:step_index]
         return all(s in completed_steps for s in required_steps)
 
     def compute_context_aware_values(
@@ -159,30 +177,35 @@ class DAGEngine:
         """
         이전 단계 설정값을 기반으로 현재 단계의 값을 자동 계산한다. (FR-A-005)
 
-        §4-4 Context-Aware Form 반영:
-        - 2-2: VPC CIDR → 서브넷 CIDR 자동 분배 (환경별 서브넷 수 다름)
-                          NAT Gateway 생성 여부 결정 (dev는 미생성)
-        - 2-3: SG 간 참조 관계 자동 구성 (Chaining)
-        - 2-4: ALB → Public Subnet 자동 배치
-        - 2-5: 환경별 ECS 프리셋 자동 결정
-        - 2-6: 환경별 RDS 프리셋 자동 결정
+        Gemini 추론값(recommended_config)이 current_config에 있으면 우선 적용.
+        보안·운영 기준값(multi_az, backup_retention 등)은 환경 프리셋으로 결정.
 
         §4-4 환경별 프리셋 매트릭스:
-        항목            prod              staging           dev
-        서브넷 구성     Public 2+Private 2 Public 1+Private 1 Public 1+Private 1
-        NAT Gateway   생성               생성               미생성
+        항목              production        staging           development
+        서브넷 구성       Public 2+Private 2 Public 1+Private 1 Public 1+Private 1
+        NAT Gateway      생성               생성               미생성
+        ECS 최소 태스크  2                  1                  1
+        Multi-AZ         ON                 OFF                OFF
+        RDS 백업 보존    30일               7일                0일
+        RDS 암호화       ON                 ON                 OFF
         """
         computed = {}
-        env = current_config.get("environment", "dev")
+        env = _normalize_env(current_config.get("environment", "production"))
+
+        # Gemini 추론값 추출 (analyze_intent 결과가 config에 포함된 경우)
+        gemini = current_config.get("recommended_config", {})
 
         if step == "2-2":
             vpc_cidr = current_config.get("vpc_cidr", "10.0.0.0/16")
+            # Gemini가 추론한 VPC CIDR이 있으면 우선 사용
+            if gemini.get("vpc", {}).get("cidr"):
+                vpc_cidr = gemini["vpc"]["cidr"]
+
             computed["subnet_auto"] = self._compute_subnet_cidrs(vpc_cidr, env)
-            # §4-4: prod/staging → NAT GW 생성, dev → 미생성
-            computed["nat_gateway"] = env in ("prod", "staging")
+            # production/staging → NAT GW 생성, development → 미생성
+            computed["nat_gateway"] = env in ("production", "staging")
 
         elif step == "2-3":
-            # §4-3: ALB용(80/443), App용(ALB에서만), DB용(App에서만 5432)
             computed["sg_chaining"] = {
                 "sg_alb": {
                     "inbound": [
@@ -199,14 +222,17 @@ class DAGEngine:
             }
 
         elif step == "2-4":
-            # §4-4: ALB는 Public Subnet에 자동 배치
             computed["alb_subnet_type"] = "public"
 
         elif step == "2-5":
-            computed["ecs_preset"] = self._get_ecs_preset(env)
+            # Gemini ECS 추론값 추출
+            gemini_ecs = gemini.get("ecs", {})
+            computed["ecs_preset"] = self._get_ecs_preset(env, gemini_ecs)
 
         elif step == "2-6":
-            computed["rds_preset"] = self._get_rds_preset(env)
+            # Gemini RDS 추론값 추출
+            gemini_rds = gemini.get("rds", {})
+            computed["rds_preset"] = self._get_rds_preset(env, gemini_rds)
 
         return computed
 
@@ -215,15 +241,11 @@ class DAGEngine:
     ) -> list[str]:
         """
         {prefix}-{env}-{resource} 패턴으로 네이밍 미리보기를 생성한다. (FR-A-003)
-        §7-5 POST /api/craft/config 응답 포맷: 평면 문자열 배열로 반환.
-        예: ["DD-prod-vpc", "DD-prod-ecs-cluster", "DD-prod-rds", "DD-prod-alb"]
-
-        환경별 서브넷 수 반영 (§4-4 프리셋 매트릭스):
-        - prod:          Public 2 + Private 2 → 4개 서브넷 네이밍
-        - staging / dev: Public 1 + Private 1 → 2개 서브넷 네이밍
+        환경별 서브넷 수 반영 (§4-4 프리셋 매트릭스).
         """
-        p = prefix
-        e = environment
+        p   = prefix
+        e   = environment
+        env = _normalize_env(environment)
 
         base_names = [
             f"{p}-{e}-vpc",
@@ -242,8 +264,7 @@ class DAGEngine:
             f"{p}-{e}-rds",
         ]
 
-        if environment == "prod":
-            # prod: Public 2 + Private 2, NAT GW 포함
+        if env == "production":
             subnet_names = [
                 f"{p}-{e}-subnet-public-a",
                 f"{p}-{e}-subnet-public-c",
@@ -254,15 +275,14 @@ class DAGEngine:
                 f"{p}-{e}-rt-private",
             ]
         else:
-            # staging / dev: Public 1 + Private 1
-            # dev는 NAT GW 미생성
+            # staging / development: Public 1 + Private 1
             subnet_names = [
                 f"{p}-{e}-subnet-public-a",
                 f"{p}-{e}-subnet-private-a",
                 f"{p}-{e}-rt-public",
                 f"{p}-{e}-rt-private",
             ]
-            if environment == "staging":
+            if env == "staging":
                 subnet_names.append(f"{p}-{e}-nat")
 
         return base_names + subnet_names
@@ -271,20 +291,24 @@ class DAGEngine:
 
     def _compute_subnet_cidrs(self, vpc_cidr: str, environment: str) -> dict:
         """
-        환경별로 서브넷 CIDR을 자동 분배한다. (§4-4 프리셋 매트릭스)
+        환경별로 서브넷 CIDR을 자동 분배한다.
 
-        prod:          Public 2 + Private 2
-        staging / dev: Public 1 + Private 1
+        production:          Public 2 + Private 2
+        staging/development: Public 1 + Private 1
 
-        기본 VPC CIDR 10.0.0.0/16 기준:
-          Public A:  10.0.1.0/24
-          Public C:  10.0.2.0/24  (prod만)
-          Private A: 10.0.10.0/24
-          Private C: 10.0.20.0/24 (prod만)
+        VPC CIDR에서 앞 두 옥텟을 추출해 서브넷 대역 계산.
+        예: 10.0.0.0/16 → public-a: 10.0.1.0/24, private-a: 10.0.10.0/24
         """
-        prefix_16 = ".".join(vpc_cidr.split(".")[:2])  # 예: "10.0"
+        import ipaddress
+        try:
+            network    = ipaddress.ip_network(vpc_cidr, strict=False)
+            base       = str(network.network_address)
+            octets     = base.split(".")
+            prefix_16  = f"{octets[0]}.{octets[1]}"
+        except ValueError:
+            prefix_16 = "10.0"
 
-        if environment == "prod":
+        if environment == "production":
             return {
                 "public_a":  f"{prefix_16}.1.0/24",
                 "public_c":  f"{prefix_16}.2.0/24",
@@ -292,81 +316,100 @@ class DAGEngine:
                 "private_c": f"{prefix_16}.20.0/24",
             }
         else:
-            # staging / dev: Public 1 + Private 1
+            # staging / development: Public 1 + Private 1
             return {
                 "public_a":  f"{prefix_16}.1.0/24",
+                "public_c":  f"{prefix_16}.2.0/24",   # hcl_template 호환성 유지
                 "private_a": f"{prefix_16}.10.0/24",
+                "private_c": f"{prefix_16}.20.0/24",  # hcl_template 호환성 유지
             }
 
-    def _get_ecs_preset(self, environment: str) -> dict:
+    def _get_ecs_preset(
+        self, environment: str, gemini_ecs: dict
+    ) -> dict:
         """
-        환경별 ECS 프리셋을 반환한다. (§4-4 환경별 프리셋 자동 결정 매트릭스)
+        환경별 ECS 프리셋을 반환한다.
 
-        항목                  prod              staging   dev
-        ECS 최소 태스크       2                 1         1
-        오토스케일링          ON (CPU 70%)      OFF       OFF
-        CloudWatch 로그 보존  90일              30일      7일
+        역할 분리:
+        - Gemini 담당: vcpu, memory, max_tasks, autoscaling_target_cpu
+        - 환경 프리셋 담당: min_tasks, cw_log_retention_days (운영·비용 기준)
+
+        Gemini 추론값이 있으면 우선 적용하고, 없는 항목만 환경 기본값으로 채운다.
         """
-        presets = {
-            "prod": {
-                "min_tasks": 2,
-                "max_tasks": 10,
-                "autoscaling": True,
-                "autoscaling_target_cpu": 70,
+        # 환경별 운영 기준값 (보안·운영 정책 — Gemini가 추론하지 않음)
+        env_presets: dict[str, dict] = {
+            "production": {
+                "min_tasks":             2,
                 "cw_log_retention_days": 90,
             },
             "staging": {
-                "min_tasks": 1,
-                "max_tasks": 5,
-                "autoscaling": False,
+                "min_tasks":             1,
                 "cw_log_retention_days": 30,
             },
-            "dev": {
-                "min_tasks": 1,
-                "max_tasks": 2,
-                "autoscaling": False,
+            "development": {
+                "min_tasks":             1,
                 "cw_log_retention_days": 7,
             },
         }
-        return presets.get(environment, presets["dev"])
+        base = env_presets.get(environment, env_presets["production"]).copy()
 
-    def _get_rds_preset(self, environment: str) -> dict:
-        """
-        환경별 RDS 프리셋을 반환한다. (§4-4 환경별 프리셋 자동 결정 매트릭스)
+        # Gemini 추론값 우선 적용
+        auto = gemini_ecs.get("autoscaling", {})
+        base["vcpu"]                    = gemini_ecs.get("vcpu",   1)
+        base["memory"]                  = gemini_ecs.get("memory", 2048)
+        base["max_tasks"]               = auto.get("max",        5)
+        base["autoscaling_target_cpu"]  = auto.get("target_cpu", 70)
+        base["autoscaling"]             = environment == "production"
 
-        항목              prod        staging     dev
-        Multi-AZ          ON          OFF         OFF
-        RDS 백업 보존     30일        7일         0일
-        RDS 암호화        ON          ON          OFF
+        return base
+
+    def _get_rds_preset(
+        self, environment: str, gemini_rds: dict
+    ) -> dict:
         """
-        presets = {
-            "prod": {
-                "multi_az": True,
+        환경별 RDS 프리셋을 반환한다.
+
+        역할 분리:
+        - Gemini 담당: instance_class (데이터 규모·성능 기준)
+        - 환경 프리셋 담당: multi_az, backup_retention_days, storage_encrypted
+          (보안·가용성·규제 기준 — 환경에 따라 정책으로 결정)
+
+        Gemini 추론값이 있으면 우선 적용하고, 없는 항목만 환경 기본값으로 채운다.
+        """
+        # 환경별 보안·가용성 기준값 (Gemini가 추론하지 않음)
+        env_presets: dict[str, dict] = {
+            "production": {
+                "multi_az":              True,
                 "backup_retention_days": 30,
-                "storage_encrypted": True,
-                "instance_class": "db.t3.medium",
-                "engine": "postgresql",
-                "engine_version": "15",
+                "storage_encrypted":     True,
+                "instance_class":        "db.t3.medium",  # Gemini 없을 때 기본값
             },
             "staging": {
-                "multi_az": False,
+                "multi_az":              False,
                 "backup_retention_days": 7,
-                "storage_encrypted": True,
-                "instance_class": "db.t3.small",
-                "engine": "postgresql",
-                "engine_version": "15",
+                "storage_encrypted":     True,
+                "instance_class":        "db.t3.small",
             },
-            "dev": {
-                "multi_az": False,
+            "development": {
+                "multi_az":              False,
                 "backup_retention_days": 0,
-                "storage_encrypted": False,
-                "instance_class": "db.t3.micro",
-                "engine": "postgresql",
-                "engine_version": "15",
+                "storage_encrypted":     False,
+                "instance_class":        "db.t3.micro",
             },
         }
-        return presets.get(environment, presets["dev"])
+        base = env_presets.get(environment, env_presets["production"]).copy()
+
+        # Gemini 추론값 우선 적용 (instance_class만)
+        if gemini_rds.get("instance_class"):
+            base["instance_class"] = gemini_rds["instance_class"]
+
+        # engine/version 고정
+        base["engine"]         = "postgresql"
+        base["engine_version"] = "15"
+
+        return base
     
+
 import uuid
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -379,22 +422,16 @@ def create_initial_deployment(
     environment: str,
     db: Session,
 ) -> Deployment:
-    """
-    Step 2-1 최초 호출 시 deployments 레코드를 생성한다.
-    config_snapshot은 /api/craft/config 호출마다 누적 저장된다.
-    terraform_code는 /api/craft/validate 단계에서 채워진다.
-    total_resources는 MVP 고정값 16개.
-    """
     deployment = Deployment(
-        deployment_id=str(uuid.uuid4()),
-        project_id=project_id,
-        prefix=prefix,
-        environment=environment,
-        terraform_code="",
-        config_snapshot={},
-        status="created",
-        total_resources=16,
-        started_at=datetime.utcnow(),
+        deployment_id   = str(uuid.uuid4()),
+        project_id      = project_id,
+        prefix          = prefix,
+        environment     = environment,
+        terraform_code  = "",
+        config_snapshot = {},
+        status          = "created",
+        total_resources = 16,
+        started_at      = datetime.utcnow(),
     )
     db.add(deployment)
     db.commit()

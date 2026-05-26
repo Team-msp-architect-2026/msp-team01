@@ -12,22 +12,32 @@ interface AnalysisResult {
 
 interface Props {
   projectId: string
+  environment: string
   onComplete: (result: AnalysisResult) => void
 }
 
-const RESOURCE_LABELS: Record<string, string> = {
-  vpc:            'VPC + Subnet 4개 + IGW + NAT Gateway',
-  security_group: 'Security Group 3개',
-  alb:            'ALB + Target Group',
-  ecs_fargate:    'ECS Fargate (오토스케일링)',
-  rds:            'RDS PostgreSQL (Multi-AZ 권장)',
+const getResourceLabels = (env: string): Record<string, string> => {
+  const isProd = env === 'prod' || env === 'production'
+  return {
+    vpc:            isProd
+      ? 'VPC + Subnet 4개 + IGW + NAT Gateway'
+      : 'VPC + Subnet 2개 + IGW',
+    security_group: 'Security Group 3개',
+    alb:            'ALB + Target Group',
+    ecs_fargate:    'ECS Fargate (오토스케일링)',
+    rds:            isProd
+      ? 'RDS PostgreSQL (Multi-AZ)'
+      : 'RDS PostgreSQL (Single-AZ)',
+  }
 }
 
-export function IntentAnalysis({ projectId, onComplete }: Props) {
+export function IntentAnalysis({ projectId, environment, onComplete }: Props) {
   const [prompt, setPrompt]           = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [result, setResult]           = useState<AnalysisResult | null>(null)
   const [error, setError]             = useState('')
+
+  const resourceLabels = getResourceLabels(environment)
 
   const handleAnalyze = async () => {
     if (!prompt.trim()) return
@@ -49,6 +59,9 @@ export function IntentAnalysis({ projectId, onComplete }: Props) {
       setIsAnalyzing(false)
     }
   }
+
+  // subnet은 vpc 항목에 포함되므로 필터링
+  const displayResources = (result?.resources ?? []).filter(r => r !== 'subnet')
 
   return (
     <>
@@ -116,18 +129,18 @@ export function IntentAnalysis({ projectId, onComplete }: Props) {
                 <span className="ia-pip" />
                 AI 분석 결과
               </div>
-              <span className="ia-result-count">{result.resources.length}개 컴포넌트</span>
+              <span className="ia-result-count">{displayResources.length}개 컴포넌트</span>
             </div>
 
             <ul className="ia-result-list">
-              {result.resources.map((r) => (
+              {displayResources.map((r) => (
                 <li key={r} className="ia-result-item">
                   <span className="ia-check">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                       <polyline points="20 6 9 17 4 12"/>
                     </svg>
                   </span>
-                  <span className="ia-item-label">{RESOURCE_LABELS[r] ?? r}</span>
+                  <span className="ia-item-label">{resourceLabels[r] ?? r}</span>
                 </li>
               ))}
             </ul>

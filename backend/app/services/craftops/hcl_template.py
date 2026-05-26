@@ -18,14 +18,35 @@ Python 템플릿 기반 Terraform HCL 생성.
   ③ RDS deletion_protection = false (destroy 시 에러 수정)
   ④ IAM Role logs:CreateLogGroup 인라인 정책 추가
   ⑤ NAT Gateway depends_on igw 추가
+- v7: 환경별 분기 추가 + 보안 개선
+  ① staging/development 환경 서브넷 2개로 분기
+  ② staging/development NAT Gateway 조건부 생성
+  ③ RDS 패스워드 하드코딩 제거 → aws_secretsmanager_secret_version 참조
+  ④ cpu_units 타입 수정 (문자열 → 숫자)
+  ⑤ allocated_storage config_snapshot에서 읽도록 수정
 """
+from __future__ import annotations
+
+
+def _normalize_env(environment: str) -> str:
+    """environment 값을 정규화한다."""
+    mapping = {
+        "prod":        "production",
+        "production":  "production",
+        "stage":       "staging",
+        "staging":     "staging",
+        "dev":         "development",
+        "development": "development",
+    }
+    return mapping.get(environment.lower(), "production")
 
 
 def generate_hcl(config_snapshot: dict, include_backend: bool = True) -> str:
     project_id  = config_snapshot.get("project_id", "unknown")
     prefix      = config_snapshot.get("prefix", "APP")
-    environment = config_snapshot.get("environment", "prod")
+    environment = config_snapshot.get("environment", "production")
     region      = config_snapshot.get("region", "us-west-2")
+    env         = _normalize_env(environment)
 
     network     = config_snapshot.get("network", {})
     vpc_cidr    = network.get("vpc_cidr", "10.0.0.0/16")
@@ -41,28 +62,34 @@ def generate_hcl(config_snapshot: dict, include_backend: bool = True) -> str:
     prv_c  = subnet_auto.get("private_c", "10.0.20.0/24")
 
     app_tier      = config_snapshot.get("app_tier", {})
-    vcpu          = app_tier.get("vcpu", 1)
-    memory        = app_tier.get("memory", 2048)
+    vcpu          = float(app_tier.get("vcpu", 1))
+    memory        = int(app_tier.get("memory", 2048))
     container_img = app_tier.get("container_image", "nginx:latest")
     ecs_preset    = app_tier.get("ecs_preset", {})
-    min_tasks     = ecs_preset.get("min_tasks", 2)
-    max_tasks     = ecs_preset.get("max_tasks", 10)
-    cpu_target    = ecs_preset.get("autoscaling_target_cpu", 70)
-    cw_retention  = ecs_preset.get("cw_log_retention_days", 90)
+    min_tasks     = int(ecs_preset.get("min_tasks", 2))
+    max_tasks     = int(ecs_preset.get("max_tasks", 10))
+    cpu_target    = int(ecs_preset.get("autoscaling_target_cpu", 70))
+    cw_retention  = int(ecs_preset.get("cw_log_retention_days", 90))
 
-    data_tier      = config_snapshot.get("data_tier", {})
-    rds_preset     = data_tier.get("rds_preset", {})
-    multi_az       = str(rds_preset.get("multi_az", True)).lower()
-    backup_days    = rds_preset.get("backup_retention_days", 30)
-    encrypted      = str(rds_preset.get("storage_encrypted", True)).lower()
-    rds_class      = rds_preset.get("instance_class", "db.t3.medium")
-    rds_engine_raw = rds_preset.get("engine", "postgresql")
-    rds_engine     = "postgres" if rds_engine_raw == "postgresql" else rds_engine_raw
-    rds_version    = rds_preset.get("engine_version", "15")
+    data_tier         = config_snapshot.get("data_tier", {})
+    rds_preset        = data_tier.get("rds_preset", {})
+    multi_az          = str(rds_preset.get("multi_az", True)).lower()
+    backup_days       = int(rds_preset.get("backup_retention_days", 30))
+    encrypted         = str(rds_preset.get("storage_encrypted", True)).lower()
+    rds_class         = rds_preset.get("instance_class", "db.t3.medium")
+    rds_engine_raw    = rds_preset.get("engine", "postgresql")
+    rds_engine        = "postgres" if rds_engine_raw == "postgresql" else rds_engine_raw
+    rds_version       = rds_preset.get("engine_version", "15")
+    allocated_storage = int(data_tier.get("allocated_storage", 20))
 
-    p         = f"{prefix}-{environment}"
-    p_lower   = f"{prefix}-{environment}".lower()
+    p        = f"{prefix}-{environment}"
+    p_lower  = f"{prefix}-{environment}".lower()
+    # cpu_units는 숫자 타입으로 처리 (문자열 아님)
     cpu_units = int(vcpu * 1024)
+
+    # 환경별 분기값
+    is_production = env == "production"
+    has_nat       = env in ("production", "staging")
 
     if include_backend:
         terraform_block = (
@@ -71,6 +98,10 @@ def generate_hcl(config_snapshot: dict, include_backend: bool = True) -> str:
             "    aws = {\n"
             '      source  = "hashicorp/aws"\n'
             '      version = "~> 5.0"\n'
+            "    }\n"
+            "    random = {\n"
+            '      source  = "hashicorp/random"\n'
+            '      version = "~> 3.0"\n'
             "    }\n"
             "  }\n"
             "\n"
@@ -91,38 +122,17 @@ def generate_hcl(config_snapshot: dict, include_backend: bool = True) -> str:
             '      source  = "hashicorp/aws"\n'
             '      version = "~> 5.0"\n'
             "    }\n"
+            "    random = {\n"
+            '      source  = "hashicorp/random"\n'
+            '      version = "~> 3.0"\n'
+            "    }\n"
             "  }\n"
             "}"
         )
 
-    return f"""# ============================================================
-# AutoOps 자동 생성 Terraform HCL
-# project_id: {project_id}
-# prefix: {prefix} / environment: {environment} / region: {region}
-# ============================================================
-
-{terraform_block}
-
-provider "aws" {{
-  region = "{region}"
-}}
-
-# ── VPC ───────────────────────────────────────────────────────────────
-
-resource "aws_vpc" "{p}-vpc" {{
-  cidr_block           = "{vpc_cidr}"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = {{
-    Name        = "{p}-vpc"
-    Environment = "{environment}"
-    Project     = "{project_id}"
-  }}
-}}
-
-# ── Subnets ────────────────────────────────────────────────────────────
-
+    # ── 환경별 서브넷 블록 생성 ──────────────────────────────────────
+    if is_production:
+        subnet_blocks = f"""
 resource "aws_subnet" "{p}-subnet-public-a" {{
   vpc_id                  = aws_vpc.{p}-vpc.id
   cidr_block              = "{pub_a}"
@@ -171,21 +181,89 @@ resource "aws_subnet" "{p}-subnet-private-c" {{
     Environment = "{environment}"
     Project     = "{project_id}"
   }}
+}}"""
+
+        route_table_associations = f"""
+resource "aws_route_table_association" "{p}-rta-public-a" {{
+  subnet_id      = aws_subnet.{p}-subnet-public-a.id
+  route_table_id = aws_route_table.{p}-rt-public.id
 }}
 
-# ── Internet Gateway ───────────────────────────────────────────────────
+resource "aws_route_table_association" "{p}-rta-public-c" {{
+  subnet_id      = aws_subnet.{p}-subnet-public-c.id
+  route_table_id = aws_route_table.{p}-rt-public.id
+}}
 
-resource "aws_internet_gateway" "{p}-igw" {{
-  vpc_id = aws_vpc.{p}-vpc.id
+resource "aws_route_table_association" "{p}-rta-private-a" {{
+  subnet_id      = aws_subnet.{p}-subnet-private-a.id
+  route_table_id = aws_route_table.{p}-rt-private.id
+}}
+
+resource "aws_route_table_association" "{p}-rta-private-c" {{
+  subnet_id      = aws_subnet.{p}-subnet-private-c.id
+  route_table_id = aws_route_table.{p}-rt-private.id
+}}"""
+
+        alb_subnets = (
+            f"aws_subnet.{p}-subnet-public-a.id,\n"
+            f"    aws_subnet.{p}-subnet-public-c.id,"
+        )
+        ecs_subnets = (
+            f"aws_subnet.{p}-subnet-private-a.id,\n"
+            f"      aws_subnet.{p}-subnet-private-c.id,"
+        )
+        rds_subnets = (
+            f"aws_subnet.{p}-subnet-private-a.id,\n"
+            f"    aws_subnet.{p}-subnet-private-c.id,"
+        )
+
+    else:
+        # staging / development: Public 1 + Private 1
+        subnet_blocks = f"""
+resource "aws_subnet" "{p}-subnet-public-a" {{
+  vpc_id                  = aws_vpc.{p}-vpc.id
+  cidr_block              = "{pub_a}"
+  availability_zone       = "{region}a"
+  map_public_ip_on_launch = true
 
   tags = {{
-    Name        = "{p}-igw"
+    Name        = "{p}-subnet-public-a"
     Environment = "{environment}"
     Project     = "{project_id}"
   }}
 }}
 
-# ── NAT Gateway ────────────────────────────────────────────────────────
+resource "aws_subnet" "{p}-subnet-private-a" {{
+  vpc_id            = aws_vpc.{p}-vpc.id
+  cidr_block        = "{prv_a}"
+  availability_zone = "{region}a"
+
+  tags = {{
+    Name        = "{p}-subnet-private-a"
+    Environment = "{environment}"
+    Project     = "{project_id}"
+  }}
+}}"""
+
+        route_table_associations = f"""
+resource "aws_route_table_association" "{p}-rta-public-a" {{
+  subnet_id      = aws_subnet.{p}-subnet-public-a.id
+  route_table_id = aws_route_table.{p}-rt-public.id
+}}
+
+resource "aws_route_table_association" "{p}-rta-private-a" {{
+  subnet_id      = aws_subnet.{p}-subnet-private-a.id
+  route_table_id = aws_route_table.{p}-rt-private.id
+}}"""
+
+        alb_subnets = f"aws_subnet.{p}-subnet-public-a.id,"
+        ecs_subnets = f"aws_subnet.{p}-subnet-private-a.id,"
+        rds_subnets = f"aws_subnet.{p}-subnet-private-a.id,"
+
+    # ── NAT Gateway 블록 (환경별 조건부 생성) ────────────────────────
+    if has_nat:
+        nat_block = f"""
+# ── NAT Gateway ─────────────────────────────────────────────────────────
 
 resource "aws_eip" "{p}-nat-eip" {{
   domain = "vpc"
@@ -208,9 +286,108 @@ resource "aws_nat_gateway" "{p}-nat" {{
     Environment = "{environment}"
     Project     = "{project_id}"
   }}
+}}"""
+        private_route = f"""
+resource "aws_route_table" "{p}-rt-private" {{
+  vpc_id = aws_vpc.{p}-vpc.id
+
+  route {{
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.{p}-nat.id
+  }}
+
+  tags = {{
+    Name        = "{p}-rt-private"
+    Environment = "{environment}"
+    Project     = "{project_id}"
+  }}
+}}"""
+    else:
+        # development: NAT Gateway 미생성, Private Route Table은 로컬만
+        nat_block = "# NAT Gateway — development 환경 미생성 (비용 절감)"
+        private_route = f"""
+resource "aws_route_table" "{p}-rt-private" {{
+  vpc_id = aws_vpc.{p}-vpc.id
+
+  tags = {{
+    Name        = "{p}-rt-private"
+    Environment = "{environment}"
+    Project     = "{project_id}"
+  }}
+}}"""
+
+    # ── RDS 패스워드: Secrets Manager 참조 ──────────────────────────
+    rds_secret_block = f"""
+# ── RDS 패스워드 (Secrets Manager) ──────────────────────────────────────
+
+resource "aws_secretsmanager_secret" "{p}-rds-secret" {{
+  name                    = "{p_lower}-rds-password"
+  recovery_window_in_days = 0
+
+  tags = {{
+    Name        = "{p}-rds-secret"
+    Environment = "{environment}"
+    Project     = "{project_id}"
+  }}
 }}
 
-# ── Route Tables ───────────────────────────────────────────────────────
+resource "aws_secretsmanager_secret_version" "{p}-rds-secret-version" {{
+  secret_id     = aws_secretsmanager_secret.{p}-rds-secret.id
+  secret_string = jsonencode({{
+    username = "dbadmin"
+    password = "AutoOps-${{random_id.db_password.hex}}"
+  }})
+}}
+
+resource "random_id" "db_password" {{
+  byte_length = 16
+}}"""
+
+    return f"""# ============================================================
+# AutoOps 자동 생성 Terraform HCL
+# project_id:  {project_id}
+# prefix:      {prefix}
+# environment: {environment} ({env})
+# region:      {region}
+# ============================================================
+
+{terraform_block}
+
+provider "aws" {{
+  region = "{region}"
+}}
+
+# ── VPC ─────────────────────────────────────────────────────────────────
+
+resource "aws_vpc" "{p}-vpc" {{
+  cidr_block           = "{vpc_cidr}"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {{
+    Name        = "{p}-vpc"
+    Environment = "{environment}"
+    Project     = "{project_id}"
+  }}
+}}
+
+# ── Subnets ──────────────────────────────────────────────────────────────
+{subnet_blocks}
+
+# ── Internet Gateway ─────────────────────────────────────────────────────
+
+resource "aws_internet_gateway" "{p}-igw" {{
+  vpc_id = aws_vpc.{p}-vpc.id
+
+  tags = {{
+    Name        = "{p}-igw"
+    Environment = "{environment}"
+    Project     = "{project_id}"
+  }}
+}}
+{nat_block}
+
+# ── Route Tables ─────────────────────────────────────────────────────────
 
 resource "aws_route_table" "{p}-rt-public" {{
   vpc_id = aws_vpc.{p}-vpc.id
@@ -226,43 +403,10 @@ resource "aws_route_table" "{p}-rt-public" {{
     Project     = "{project_id}"
   }}
 }}
+{private_route}
+{route_table_associations}
 
-resource "aws_route_table_association" "{p}-rta-public-a" {{
-  subnet_id      = aws_subnet.{p}-subnet-public-a.id
-  route_table_id = aws_route_table.{p}-rt-public.id
-}}
-
-resource "aws_route_table_association" "{p}-rta-public-c" {{
-  subnet_id      = aws_subnet.{p}-subnet-public-c.id
-  route_table_id = aws_route_table.{p}-rt-public.id
-}}
-
-resource "aws_route_table" "{p}-rt-private" {{
-  vpc_id = aws_vpc.{p}-vpc.id
-
-  route {{
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.{p}-nat.id
-  }}
-
-  tags = {{
-    Name        = "{p}-rt-private"
-    Environment = "{environment}"
-    Project     = "{project_id}"
-  }}
-}}
-
-resource "aws_route_table_association" "{p}-rta-private-a" {{
-  subnet_id      = aws_subnet.{p}-subnet-private-a.id
-  route_table_id = aws_route_table.{p}-rt-private.id
-}}
-
-resource "aws_route_table_association" "{p}-rta-private-c" {{
-  subnet_id      = aws_subnet.{p}-subnet-private-c.id
-  route_table_id = aws_route_table.{p}-rt-private.id
-}}
-
-# ── Security Groups ─────────────────────────────────────────────────────
+# ── Security Groups ──────────────────────────────────────────────────────
 
 #tfsec:ignore:AVD-AWS-0107
 #tfsec:ignore:AVD-AWS-0104
@@ -360,7 +504,7 @@ resource "aws_security_group" "{p}-sg-db" {{
   }}
 }}
 
-# ── ALB ────────────────────────────────────────────────────────────────
+# ── ALB ──────────────────────────────────────────────────────────────────
 
 resource "aws_lb" "{p}-alb" {{
   name               = "{p}-alb"
@@ -368,8 +512,7 @@ resource "aws_lb" "{p}-alb" {{
   load_balancer_type = "application"
   security_groups    = [aws_security_group.{p}-sg-alb.id]
   subnets = [
-    aws_subnet.{p}-subnet-public-a.id,
-    aws_subnet.{p}-subnet-public-c.id,
+    {alb_subnets}
   ]
 
   drop_invalid_header_fields = true
@@ -405,7 +548,6 @@ resource "aws_lb_target_group" "{p}-tg" {{
   }}
 }}
 
-# [v6 수정①] redirect → forward (TG-ALB 연결 보장)
 resource "aws_lb_listener" "{p}-listener-http" {{
   load_balancer_arn = aws_lb.{p}-alb.arn
   port              = 80
@@ -423,7 +565,7 @@ resource "aws_lb_listener" "{p}-listener-http" {{
   }}
 }}
 
-# ── IAM Role ───────────────────────────────────────────────────────────
+# ── IAM Role ─────────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "{p}-iam-role" {{
   name = "{p}-iam-role"
@@ -449,7 +591,6 @@ resource "aws_iam_role_policy_attachment" "{p}-iam-policy" {{
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }}
 
-# [v6 수정④] logs:CreateLogGroup 인라인 정책 추가
 resource "aws_iam_role_policy" "{p}-iam-logs-policy" {{
   name = "{p}-iam-logs-policy"
   role = aws_iam_role.{p}-iam-role.id
@@ -464,7 +605,7 @@ resource "aws_iam_role_policy" "{p}-iam-logs-policy" {{
   }})
 }}
 
-# ── CloudWatch Log Group ────────────────────────────────────────────────
+# ── CloudWatch Log Group ─────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "{p}-cw-log" {{
   name              = "/ecs/{p}-app"
@@ -477,7 +618,7 @@ resource "aws_cloudwatch_log_group" "{p}-cw-log" {{
   }}
 }}
 
-# ── ECS Cluster ────────────────────────────────────────────────────────
+# ── ECS Cluster ──────────────────────────────────────────────────────────
 
 resource "aws_ecs_cluster" "{p}-ecs-cluster" {{
   name = "{p}-ecs-cluster"
@@ -489,12 +630,12 @@ resource "aws_ecs_cluster" "{p}-ecs-cluster" {{
   }}
 }}
 
-# ── ECS Task Definition ─────────────────────────────────────────────────
+# ── ECS Task Definition ──────────────────────────────────────────────────
 
 resource "aws_ecs_task_definition" "{p}-ecs-task-def" {{
   family                   = "{p}-ecs-task-def"
-  cpu                      = "{cpu_units}"
-  memory                   = "{memory}"
+  cpu                      = {cpu_units}
+  memory                   = {memory}
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   execution_role_arn       = aws_iam_role.{p}-iam-role.arn
@@ -527,7 +668,7 @@ resource "aws_ecs_task_definition" "{p}-ecs-task-def" {{
   }}
 }}
 
-# ── ECS Service ─────────────────────────────────────────────────────────
+# ── ECS Service ──────────────────────────────────────────────────────────
 
 resource "aws_ecs_service" "{p}-ecs-service" {{
   name            = "{p}-ecs-service"
@@ -536,13 +677,11 @@ resource "aws_ecs_service" "{p}-ecs-service" {{
   desired_count   = {min_tasks}
   launch_type     = "FARGATE"
 
-  # [v6 수정②] 리스너 생성 완료 후 ECS Service 생성
   depends_on = [aws_lb_listener.{p}-listener-http]
 
   network_configuration {{
     subnets = [
-      aws_subnet.{p}-subnet-private-a.id,
-      aws_subnet.{p}-subnet-private-c.id,
+      {ecs_subnets}
     ]
     security_groups  = [aws_security_group.{p}-sg-app.id]
     assign_public_ip = false
@@ -566,7 +705,7 @@ resource "aws_ecs_service" "{p}-ecs-service" {{
   }}
 }}
 
-# ── Auto Scaling ────────────────────────────────────────────────────────
+# ── Auto Scaling ─────────────────────────────────────────────────────────
 
 resource "aws_appautoscaling_target" "{p}-ecs-scaling-target" {{
   max_capacity       = {max_tasks}
@@ -593,13 +732,12 @@ resource "aws_appautoscaling_policy" "{p}-ecs-scaling-policy" {{
   }}
 }}
 
-# ── RDS Subnet Group ────────────────────────────────────────────────────
+# ── RDS Subnet Group ─────────────────────────────────────────────────────
 
 resource "aws_db_subnet_group" "{p}-rds-subnet-group" {{
   name = "{p_lower}-rds-subnet-group"
   subnet_ids = [
-    aws_subnet.{p}-subnet-private-a.id,
-    aws_subnet.{p}-subnet-private-c.id,
+    {rds_subnets}
   ]
 
   tags = {{
@@ -608,19 +746,20 @@ resource "aws_db_subnet_group" "{p}-rds-subnet-group" {{
     Project     = "{project_id}"
   }}
 }}
+{rds_secret_block}
 
-# ── RDS Instance ────────────────────────────────────────────────────────
+# ── RDS Instance ─────────────────────────────────────────────────────────
 
 resource "aws_db_instance" "{p}-rds" {{
   identifier              = "{p_lower}-rds"
-  allocated_storage       = 20
+  allocated_storage       = {allocated_storage}
   storage_type            = "gp3"
   engine                  = "{rds_engine}"
   engine_version          = "{rds_version}"
   instance_class          = "{rds_class}"
   db_name                 = "appdb"
-  username                = "dbadmin"
-  password                = "AutoOps2026!"
+  username                = jsondecode(aws_secretsmanager_secret_version.{p}-rds-secret-version.secret_string)["username"]
+  password                = jsondecode(aws_secretsmanager_secret_version.{p}-rds-secret-version.secret_string)["password"]
   parameter_group_name    = "default.{rds_engine}{rds_version}"
   multi_az                = {multi_az}
   db_subnet_group_name    = aws_db_subnet_group.{p}-rds-subnet-group.name
@@ -629,6 +768,8 @@ resource "aws_db_instance" "{p}-rds" {{
   backup_retention_period = {backup_days}
   storage_encrypted       = {encrypted}
   deletion_protection     = false
+
+  depends_on = [aws_secretsmanager_secret_version.{p}-rds-secret-version]
 
   tags = {{
     Name        = "{p}-rds"
