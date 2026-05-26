@@ -45,6 +45,8 @@ export interface Project {
   last_deployed_at: string | null
   last_synced_at: string | null
   created_at: string
+  aws_resource_count?: number
+  gcp_resource_count?: number 
 }
 
 // Deployment

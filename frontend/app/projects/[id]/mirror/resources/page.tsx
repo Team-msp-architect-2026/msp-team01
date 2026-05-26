@@ -63,6 +63,14 @@ const formatReviewReason = (reason: string): string => {
     .trim()
 }
 
+// confidence key → mr-badge 변종 매핑 (시각용; CONFIDENCE_CONFIG는 불변)
+const BADGE_VARIANT: Record<ExtendedConfidence, string> = {
+  auto:         'mr-badge mr-badge-ready',
+  review:       'mr-badge mr-badge-preparing',
+  manual:       'mr-badge mr-badge-failed',
+  not_required: 'mr-badge mr-badge-muted',
+}
+
 export default function ResourceMappingsPage() {
   const params = useParams()
   const projectId = params.id as string
@@ -110,208 +118,285 @@ export default function ResourceMappingsPage() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-screen text-[#9ca3af]">
-        리소스 매핑 로딩 중...
-      </div>
+      <>
+        <style>{styles}</style>
+        <div className="mr-state">
+          <span className="mr-spinner" />
+          <span>리소스 매핑 로딩 중...</span>
+        </div>
+      </>
     )
   }
 
   if (error) {
     return (
-      <div className="px-6 py-8 md:px-12 md:py-12 text-red-400">{error}</div>
+      <>
+        <style>{styles}</style>
+        <div className="mr-state mr-state-error">{error}</div>
+      </>
     )
   }
 
+  const total = autoCount + reviewCount + manualCount + notRequiredCount
+
   return (
-    <div className="px-6 py-8 md:px-12 md:py-12 max-w-5xl">
-      <h1 className="text-2xl font-bold mb-6">🗂️ 리소스 매핑 현황</h1>
+    <>
+      <style>{styles}</style>
 
-      {/* 신뢰도 요약 */}
-      <div className="flex flex-wrap gap-4 text-sm mb-6">
-        <span className="text-emerald-400 font-medium">✅ 자동 변환 {autoCount}개</span>
-        <span className="text-white/20">│</span>
-        <span className="text-yellow-400 font-medium">⚠️ 검토 필요 {reviewCount}개</span>
-        {manualCount > 0 && (
-          <>
-            <span className="text-white/20">│</span>
-            <span className="text-red-400 font-medium">🔧 수동 설정 {manualCount}개</span>
-          </>
-        )}
-        {notRequiredCount > 0 && (
-          <>
-            <span className="text-white/20">│</span>
-            <span className="text-[#9ca3af] font-medium">ℹ️ 매핑 불필요 {notRequiredCount}개</span>
-          </>
-        )}
-      </div>
+      <div className="mr-page">
 
-      {/* 매핑 테이블 */}
-      <div className="bg-[#121214] border border-white/8 rounded-3xl overflow-hidden">
-        {mappings.length === 0 ? (
-          <div className="p-12 text-center">
-            <p className="text-[#9ca3af]">매핑된 리소스가 없습니다.</p>
-            <p className="text-xs text-[#9ca3af]/60 mt-2">
-              CraftOps로 AWS 인프라 배포 후 MirrorOps 동기화 시 표시됩니다.
-            </p>
+        {/* ── Page header ────────────────────────────── */}
+        <header className="mr-page-header">
+          <div className="mr-eyebrow">
+            <span className="mr-pip" />
+            MirrorOps · AWS → GCP
           </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-white/8">
-                <th className="text-left p-4 text-xs text-[#9ca3af] font-semibold">AWS 리소스</th>
-                <th className="text-left p-4 text-xs text-[#9ca3af] font-semibold">GCP 리소스</th>
-                <th className="text-left p-4 text-xs text-[#9ca3af] font-semibold">신뢰도</th>
-                <th className="text-left p-4 text-xs text-[#9ca3af] font-semibold">액션</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mappings.map((m, i) => {
-                const conf       = CONFIDENCE_CONFIG[getConfidence(m)]
-                const isNR       = (m.confidence as string) === 'not_required'
-                return (
-                  <tr
-                    key={i}
-                    className={`border-b border-white/8 hover:bg-white/[0.02] ${isNR ? 'opacity-50' : ''}`}
-                  >
-                    <td className="p-4">
-                      <p className="font-medium">
-                        {AWS_TYPE_SHORT[m.aws_resource_type] ?? m.aws_resource_type}
-                      </p>
-                      <p className="text-xs text-[#9ca3af] mt-0.5">{m.aws_resource_name}</p>
-                    </td>
-                    <td className="p-4">
-                      {isNR ? (
-                        <p className="text-xs text-[#9ca3af] italic">GCP 불필요</p>
-                      ) : (
-                        <>
-                          <p className="font-medium">
-                            {m.gcp_resource_type
-                              ? GCP_TYPE_SHORT[m.gcp_resource_type] ?? m.gcp_resource_type
-                              : '-'}
-                          </p>
-                          <p className="text-xs text-[#9ca3af] mt-0.5">
-                            {m.gcp_resource_name ?? '-'}
-                          </p>
-                        </>
-                      )}
-                    </td>
-                    <td className="p-4">
-                      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${conf.badgeClass}`}>
-                        {conf.label}
-                      </span>
-                    </td>
-                    <td className="p-4">
-                      {m.confidence === 'review' && !isConfirmed(m) && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white text-xs"
-                          onClick={() => setSelectedMapping(m)}
-                        >
-                          확인
-                        </Button>
-                      )}
-                      {m.confidence === 'review' && isConfirmed(m) && (
-                        <span className="text-xs text-emerald-400">✅ 확인됨</span>
-                      )}
-                    </td>
+          <h1 className="mr-page-title">리소스 매핑 현황</h1>
+          <p className="mr-page-desc">
+            CraftOps가 배포한 AWS 리소스를 GCP DR 환경으로 변환한 결과입니다. 검토가 필요한 항목은
+            Terraform 코드를 직접 확인하고 확정해주세요.
+          </p>
+        </header>
+
+        {/* ── Summary strip ──────────────────────────── */}
+        <section className="mr-summary">
+          <div className="mr-sum-card mr-sum-auto">
+            <div className="mr-sum-eyebrow">자동 변환</div>
+            <div className="mr-sum-num">{autoCount}</div>
+            <div className="mr-sum-foot">
+              {total > 0 ? Math.round((autoCount / total) * 100) : 0}% · ready
+            </div>
+          </div>
+          <div className="mr-sum-card mr-sum-review">
+            <div className="mr-sum-eyebrow">검토 필요</div>
+            <div className="mr-sum-num">{reviewCount}</div>
+            <div className="mr-sum-foot">
+              {total > 0 ? Math.round((reviewCount / total) * 100) : 0}% · preparing
+            </div>
+          </div>
+          <div className={`mr-sum-card mr-sum-manual ${manualCount === 0 ? 'mr-dim' : ''}`}>
+            <div className="mr-sum-eyebrow">수동 설정</div>
+            <div className="mr-sum-num">{manualCount}</div>
+            <div className="mr-sum-foot">
+              {total > 0 ? Math.round((manualCount / total) * 100) : 0}% · failed
+            </div>
+          </div>
+          <div className={`mr-sum-card mr-sum-nr ${notRequiredCount === 0 ? 'mr-dim' : ''}`}>
+            <div className="mr-sum-eyebrow">매핑 불필요</div>
+            <div className="mr-sum-num">{notRequiredCount}</div>
+            <div className="mr-sum-foot">
+              {total > 0 ? Math.round((notRequiredCount / total) * 100) : 0}% · skipped
+            </div>
+          </div>
+        </section>
+
+        {/* ── Mapping table ──────────────────────────── */}
+        <section className="mr-card mr-table-card">
+          <div className="mr-card-head">
+            <div>
+              <div className="mr-card-eyebrow">
+                <span className="mr-pip mr-pip-blue" />
+                Mapping Table
+              </div>
+              <h2 className="mr-card-title">전체 리소스 ({mappings.length})</h2>
+            </div>
+            <div className="mr-card-meta">
+              <span className="mr-meta-k">REGION PAIR</span>
+              <span className="mr-meta-v">us-west-2 → asia-northeast3</span>
+            </div>
+          </div>
+
+          {mappings.length === 0 ? (
+            <div className="mr-empty">
+              <p className="mr-empty-title">매핑된 리소스가 없습니다.</p>
+              <p className="mr-empty-sub">
+                CraftOps로 AWS 인프라 배포 후 MirrorOps 동기화 시 표시됩니다.
+              </p>
+            </div>
+          ) : (
+            <div className="mr-table-wrap">
+              <table className="mr-table">
+                <thead>
+                  <tr>
+                    <th>AWS 리소스</th>
+                    <th>GCP 리소스</th>
+                    <th>신뢰도</th>
+                    <th className="mr-th-action">액션</th>
                   </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        )}
+                </thead>
+                <tbody>
+                  {mappings.map((m, i) => {
+                    const confKey    = getConfidence(m)
+                    const conf       = CONFIDENCE_CONFIG[confKey]
+                    const isNR       = (m.confidence as string) === 'not_required'
+                    return (
+                      <tr key={i} className={`mr-row ${isNR ? 'mr-row-nr' : ''}`}>
+                        <td>
+                          <div className="mr-res">
+                            <div className="mr-res-type mr-res-aws">
+                              {AWS_TYPE_SHORT[m.aws_resource_type] ?? m.aws_resource_type}
+                            </div>
+                            <div className="mr-res-name">{m.aws_resource_name}</div>
+                          </div>
+                        </td>
+                        <td>
+                          {isNR ? (
+                            <span className="mr-nr-tag">GCP 불필요</span>
+                          ) : (
+                            <div className="mr-res">
+                              <div className="mr-res-type mr-res-gcp">
+                                {m.gcp_resource_type
+                                  ? GCP_TYPE_SHORT[m.gcp_resource_type] ?? m.gcp_resource_type
+                                  : '-'}
+                              </div>
+                              <div className="mr-res-name">
+                                {m.gcp_resource_name ?? '-'}
+                              </div>
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          <span className={BADGE_VARIANT[confKey]}>
+                            {conf.label}
+                          </span>
+                        </td>
+                        <td className="mr-td-action">
+                          {m.confidence === 'review' && !isConfirmed(m) && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mr-btn-confirm"
+                              onClick={() => setSelectedMapping(m)}
+                            >
+                              확인
+                            </Button>
+                          )}
+                          {m.confidence === 'review' && isConfirmed(m) && (
+                            <span className="mr-confirmed">
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12"/>
+                              </svg>
+                              확인됨
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </div>
 
-      {/* 매핑 상세 모달 */}
+      {/* ── Modal ─────────────────────────────────── */}
       {selectedMapping && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div className="bg-[#121214] border border-white/8 rounded-3xl w-full max-w-lg mx-4 p-6">
-            <div className="flex justify-between items-center mb-4">
-              <p className="font-semibold">
-                {AWS_TYPE_SHORT[selectedMapping.aws_resource_type] ?? selectedMapping.aws_resource_type}
-                {' → '}
-                {selectedMapping.gcp_resource_type
-                  ? GCP_TYPE_SHORT[selectedMapping.gcp_resource_type] ?? selectedMapping.gcp_resource_type
-                  : 'GCP 리소스'}{' '}
-                매핑 상세
-              </p>
+        <div className="mr-modal-backdrop">
+          <div className="mr-modal">
+            <header className="mr-modal-head">
+              <div>
+                <div className="mr-card-eyebrow">
+                  <span className="mr-pip mr-pip-blue" />
+                  Mapping Detail
+                </div>
+                <h3 className="mr-modal-title">
+                  <span className="mr-modal-aws">
+                    {AWS_TYPE_SHORT[selectedMapping.aws_resource_type] ?? selectedMapping.aws_resource_type}
+                  </span>
+                  <span className="mr-modal-arrow">→</span>
+                  <span className="mr-modal-gcp">
+                    {selectedMapping.gcp_resource_type
+                      ? GCP_TYPE_SHORT[selectedMapping.gcp_resource_type] ?? selectedMapping.gcp_resource_type
+                      : 'GCP 리소스'}
+                  </span>
+                </h3>
+              </div>
               <button
                 onClick={() => { setSelectedMapping(null); setIsEditing(false) }}
-                className="text-[#9ca3af] hover:text-white transition-colors"
+                className="mr-modal-close"
+                aria-label="닫기"
               >
                 ✕
               </button>
-            </div>
+            </header>
 
-            <div className="space-y-4">
-              <div>
-                <p className="text-xs text-[#9ca3af] mb-1">
-                  AWS {AWS_TYPE_SHORT[selectedMapping.aws_resource_type]} (원본)
-                </p>
-                <p className="text-sm font-mono bg-black/30 border border-white/8 rounded-xl p-3">
+            <div className="mr-modal-body">
+              <div className="mr-kv">
+                <div className="mr-kv-label">
+                  AWS · {AWS_TYPE_SHORT[selectedMapping.aws_resource_type]} (원본)
+                </div>
+                <div className="mr-kv-value mr-mono">
                   {selectedMapping.aws_resource_name}
-                </p>
+                </div>
               </div>
-              <div>
-                <p className="text-xs text-[#9ca3af] mb-1">
-                  GCP{' '}
-                  {selectedMapping.gcp_resource_type
+              <div className="mr-kv">
+                <div className="mr-kv-label">
+                  GCP · {selectedMapping.gcp_resource_type
                     ? GCP_TYPE_SHORT[selectedMapping.gcp_resource_type]
-                    : ''}{' '}
-                  (변환 결과)
-                </p>
-                <p className="text-sm font-mono bg-black/30 border border-white/8 rounded-xl p-3">
+                    : ''} (변환 결과)
+                </div>
+                <div className="mr-kv-value mr-mono">
                   {selectedMapping.gcp_resource_name ?? '-'}
-                </p>
+                </div>
               </div>
 
-              {/* 검토 안내 — 사용자 친화적 표시 */}
+              {/* 검토 안내 */}
               {selectedMapping.review_reason && (
-                <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-xl p-3 text-xs text-yellow-400 space-y-1">
-                  <p className="font-semibold">⚠️ 검토가 필요한 이유</p>
-                  <p className="text-yellow-400/80 leading-relaxed">
+                <div className="mr-callout">
+                  <div className="mr-callout-head">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                      <line x1="12" y1="9" x2="12" y2="13"/>
+                      <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    검토가 필요한 이유
+                  </div>
+                  <p className="mr-callout-body">
                     {formatReviewReason(selectedMapping.review_reason)}
                   </p>
                 </div>
               )}
 
-              {/* Terraform 코드 — 수정 모드 */}
+              {/* Terraform 코드 */}
               {isEditing ? (
-                <div>
-                  <p className="text-xs text-[#9ca3af] mb-1">Terraform 코드 수정</p>
+                <div className="mr-kv">
+                  <div className="mr-kv-label mr-kv-label-edit">
+                    <span>Terraform 코드 수정</span>
+                    <span className="mr-edit-flag">EDITING</span>
+                  </div>
                   <textarea
                     value={editedCode}
                     onChange={(e) => setEditedCode(e.target.value)}
-                    rows={8}
-                    className="w-full text-xs font-mono bg-black/30 border border-white/20 rounded-xl p-3 text-white resize-none focus:outline-none focus:border-white/40"
+                    rows={10}
+                    className="mr-textarea mr-mono"
                   />
                 </div>
               ) : (
                 selectedMapping.terraform_code && (
-                  <div>
-                    <p className="text-xs text-[#9ca3af] mb-1">Terraform 코드</p>
-                    <pre className="text-xs font-mono bg-black/30 border border-white/8 rounded-xl p-3 text-[#9ca3af] overflow-x-auto whitespace-pre-wrap">
+                  <div className="mr-kv">
+                    <div className="mr-kv-label">Terraform 코드</div>
+                    <pre className="mr-code mr-mono">
                       {selectedMapping.terraform_code}
                     </pre>
                   </div>
                 )
               )}
 
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="mr-modal-actions">
                 {isEditing ? (
                   <>
                     <Button
                       variant="outline"
                       size="sm"
-                      className="border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white"
+                      className="mr-btn-secondary"
                       onClick={() => setIsEditing(false)}
                     >
                       취소
                     </Button>
                     <Button
                       size="sm"
-                      className="bg-blue-600 hover:bg-blue-700 text-white"
+                      className="mr-btn-primary mr-btn-save"
                       onClick={handleSaveEdit}
                     >
                       저장
@@ -322,14 +407,14 @@ export default function ResourceMappingsPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="border-white/10 text-[#9ca3af] hover:bg-white/5 hover:text-white"
+                      className="mr-btn-secondary"
                       onClick={() => handleOpenEdit(selectedMapping)}
                     >
                       ✏️ 수정
                     </Button>
                     <Button
                       size="sm"
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                      className="mr-btn-primary mr-btn-approve"
                       onClick={() => handleConfirm(selectedMapping)}
                     >
                       ✅ 확인 완료
@@ -341,6 +426,497 @@ export default function ResourceMappingsPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
+
+// ─── styles ─────────────────────────────────────────────────────
+const styles = `
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+.mr-page {
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  color: #edf0f6;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 40px 36px 80px;
+}
+
+/* ── State views ─────────────────────────────────── */
+.mr-state {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  height: 100vh;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 14px; color: #aeb4c5;
+  background: #0b0e17;
+}
+.mr-state-error { color: #ef4444; height: auto; padding: 80px 36px; }
+.mr-spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(174,180,197,0.2);
+  border-top-color: #5aa3ff;
+  animation: mr-spin 700ms linear infinite;
+}
+@keyframes mr-spin { to { transform: rotate(360deg); } }
+
+/* ── Page header ─────────────────────────────────── */
+.mr-page-header { margin-bottom: 28px; }
+.mr-eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: #5aa3ff;
+  padding: 5px 11px;
+  border: 1px solid rgba(90,163,255,0.3);
+  border-radius: 100px;
+  background: rgba(90,163,255,0.06);
+  margin-bottom: 16px;
+}
+.mr-pip {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #ffa53d; box-shadow: 0 0 8px #ffa53d;
+  animation: mr-pulse 1.6s ease-in-out infinite;
+}
+.mr-pip-blue { background: #5aa3ff; box-shadow: 0 0 8px #5aa3ff; }
+@keyframes mr-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.85); }
+}
+.mr-page-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 36px;
+  letter-spacing: -0.03em; line-height: 1.15;
+  margin: 0 0 12px; color: #edf0f6;
+}
+.mr-page-desc {
+  font-size: 15px; color: #aeb4c5;
+  line-height: 1.6; margin: 0; max-width: 680px;
+}
+
+/* ── Summary cards ───────────────────────────────── */
+.mr-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.mr-sum-card {
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+  padding: 18px 20px;
+  position: relative;
+  overflow: hidden;
+}
+.mr-sum-card::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0;
+  height: 2px;
+  background: currentColor;
+  opacity: 0.55;
+}
+.mr-sum-auto    { color: #6ee7a0; }
+.mr-sum-review  { color: #ffa53d; }
+.mr-sum-manual  { color: #ef4444; }
+.mr-sum-nr      { color: #7a8298; }
+.mr-dim         { opacity: 0.5; }
+.mr-sum-eyebrow {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: currentColor;
+  margin-bottom: 8px;
+}
+.mr-sum-num {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 32px;
+  letter-spacing: -0.03em;
+  color: #edf0f6;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+.mr-sum-foot {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; color: #aeb4c5;
+  letter-spacing: 0.06em;
+}
+
+/* ── Card ────────────────────────────────────────── */
+.mr-card {
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+  overflow: hidden;
+}
+.mr-card-head {
+  padding: 22px 28px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+  flex-wrap: wrap;
+}
+.mr-card-eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: #5aa3ff;
+  margin-bottom: 10px;
+}
+.mr-card-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 19px;
+  letter-spacing: -0.015em;
+  color: #edf0f6;
+  margin: 0;
+}
+.mr-card-meta {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.mr-meta-k {
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: #7a8298;
+}
+.mr-meta-v {
+  font-size: 12px; color: #edf0f6;
+  letter-spacing: 0.02em;
+}
+
+/* ── Empty ───────────────────────────────────────── */
+.mr-empty { padding: 60px 28px; text-align: center; }
+.mr-empty-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 15px; font-weight: 600;
+  color: #edf0f6; margin: 0 0 6px;
+}
+.mr-empty-sub {
+  font-size: 13px; color: #aeb4c5;
+  margin: 0;
+}
+
+/* ── Table ───────────────────────────────────────── */
+.mr-table-wrap { overflow-x: auto; }
+.mr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+.mr-table thead th {
+  text-align: left;
+  padding: 14px 28px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: #7a8298;
+  background: rgba(255,255,255,0.015);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.mr-table thead .mr-th-action { width: 130px; }
+.mr-row {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  transition: background 160ms;
+}
+.mr-row:last-child { border-bottom: none; }
+.mr-row:hover { background: rgba(255,255,255,0.02); }
+.mr-row-nr { opacity: 0.5; }
+.mr-table tbody td { padding: 16px 28px; vertical-align: top; }
+
+.mr-res { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.mr-res-type {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 600; font-size: 14px;
+  letter-spacing: -0.005em;
+  color: #edf0f6;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.mr-res-type::before {
+  content: ""; width: 6px; height: 6px; border-radius: 2px;
+  flex-shrink: 0;
+}
+.mr-res-aws::before { background: #ffa53d; box-shadow: 0 0 6px rgba(255,165,61,0.6); }
+.mr-res-gcp::before { background: #5aa3ff; box-shadow: 0 0 6px rgba(90,163,255,0.6); }
+.mr-res-name {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px; color: #7a8298;
+  letter-spacing: 0.02em;
+  word-break: break-all;
+}
+.mr-nr-tag {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px; color: #7a8298;
+  font-style: italic;
+  letter-spacing: 0.04em;
+}
+
+/* ── Badges (mr-badge) ───────────────────────────── */
+.mr-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.mr-badge-ready     { background: rgba(110,231,160,0.12); color: #6ee7a0; border: 1px solid rgba(110,231,160,0.4); }
+.mr-badge-syncing   { background: rgba(90,163,255,0.12);  color: #5aa3ff; border: 1px solid rgba(90,163,255,0.4); }
+.mr-badge-preparing { background: rgba(255,165,61,0.12);  color: #ffa53d; border: 1px solid rgba(255,165,61,0.4); }
+.mr-badge-failed    { background: rgba(239,68,68,0.12);   color: #ef4444; border: 1px solid rgba(239,68,68,0.4); }
+.mr-badge-muted     { background: rgba(122,130,152,0.10); color: #aeb4c5; border: 1px solid rgba(122,130,152,0.32); }
+
+/* ── Action buttons in table ─────────────────────── */
+.mr-td-action { white-space: nowrap; }
+.mr-btn-confirm {
+  font-family: 'Plus Jakarta Sans', sans-serif !important;
+  font-size: 12px !important; font-weight: 600 !important;
+  padding: 7px 16px !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(90,163,255,0.4) !important;
+  background: rgba(90,163,255,0.10) !important;
+  color: #5aa3ff !important;
+  cursor: pointer;
+  transition: all 160ms;
+}
+.mr-btn-confirm:hover {
+  background: rgba(90,163,255,0.18) !important;
+  border-color: rgba(90,163,255,0.6) !important;
+  color: #edf0f6 !important;
+}
+.mr-confirmed {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #6ee7a0;
+}
+
+/* ── Modal ───────────────────────────────────────── */
+.mr-modal-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(11, 14, 23, 0.78);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: mr-fade-in 160ms ease-out;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+@keyframes mr-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.mr-modal {
+  width: 100%; max-width: 640px;
+  max-height: calc(100vh - 48px);
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.13);
+  background: linear-gradient(180deg, #15171f, #101218);
+  box-shadow: 0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(90,163,255,0.06);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  animation: mr-modal-in 220ms cubic-bezier(.22,.8,.18,1);
+  color: #edf0f6;
+}
+@keyframes mr-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.mr-modal-head {
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+}
+.mr-modal-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 18px;
+  letter-spacing: -0.015em;
+  margin: 0;
+  display: inline-flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
+}
+.mr-modal-aws { color: #ffa53d; }
+.mr-modal-gcp { color: #5aa3ff; }
+.mr-modal-arrow {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: #7a8298; font-weight: 500;
+}
+.mr-modal-close {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.13);
+  border-radius: 8px;
+  width: 32px; height: 32px;
+  color: #aeb4c5;
+  cursor: pointer;
+  font-size: 13px;
+  display: grid; place-items: center;
+  transition: all 160ms;
+  flex-shrink: 0;
+}
+.mr-modal-close:hover {
+  color: #edf0f6;
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.22);
+}
+
+.mr-modal-body {
+  padding: 22px 24px 24px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 16px;
+}
+
+.mr-kv { display: flex; flex-direction: column; gap: 8px; }
+.mr-kv-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: #aeb4c5;
+}
+.mr-kv-label-edit {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.mr-edit-flag {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9.5px; font-weight: 600;
+  letter-spacing: 0.18em;
+  color: #ffa53d;
+  padding: 3px 8px;
+  border: 1px solid rgba(255,165,61,0.4);
+  background: rgba(255,165,61,0.10);
+  border-radius: 100px;
+}
+.mr-kv-value {
+  font-size: 13px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 11px 14px;
+  color: #edf0f6;
+  word-break: break-all;
+}
+.mr-mono {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+
+.mr-callout {
+  border: 1px solid rgba(255,165,61,0.32);
+  background: linear-gradient(135deg, rgba(255,165,61,0.08), rgba(255,165,61,0.02));
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.mr-callout-head {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: #ffa53d;
+  margin-bottom: 8px;
+}
+.mr-callout-body {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px; line-height: 1.6;
+  color: #edf0f6;
+  margin: 0;
+}
+
+.mr-code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: #aeb4c5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  margin: 0;
+}
+.mr-textarea {
+  width: 100%;
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(90,163,255,0.32);
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: #edf0f6;
+  resize: vertical;
+  outline: none;
+  transition: border-color 160ms, box-shadow 160ms;
+  line-height: 1.6;
+}
+.mr-textarea:focus {
+  border-color: rgba(90,163,255,0.6);
+  box-shadow: 0 0 0 3px rgba(90,163,255,0.12);
+}
+
+/* ── Modal actions ───────────────────────────────── */
+.mr-modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 6px;
+  padding-top: 16px;
+}
+.mr-btn-primary {
+  padding: 10px 18px !important;
+  border-radius: 10px !important;
+  font-family: 'Plus Jakarta Sans', sans-serif !important;
+  font-size: 13px !important; font-weight: 600 !important;
+  letter-spacing: -0.005em !important;
+  border: 1px solid rgba(255,255,255,0.15) !important;
+  background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)) !important;
+  color: #edf0f6 !important;
+  cursor: pointer;
+  transition: all 180ms;
+}
+.mr-btn-secondary {
+  padding: 10px 18px !important;
+  border-radius: 10px !important;
+  font-family: 'Plus Jakarta Sans', sans-serif !important;
+  font-size: 13px !important; font-weight: 500 !important;
+  border: 1px solid rgba(255,255,255,0.13) !important;
+  background: transparent !important;
+  color: #aeb4c5 !important;
+  cursor: pointer;
+  transition: all 160ms;
+}
+.mr-btn-secondary:hover {
+  color: #edf0f6 !important;
+  background: rgba(255,255,255,0.04) !important;
+}
+.mr-btn-save {
+  background: linear-gradient(180deg, #5aa3ff, #3d83df) !important;
+  border: 1px solid rgba(90,163,255,0.6) !important;
+  color: #0b0e17 !important;
+  box-shadow: 0 0 24px rgba(90,163,255,0.22);
+}
+.mr-btn-save:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 0 32px rgba(90,163,255,0.35);
+}
+.mr-btn-approve {
+  background: linear-gradient(180deg, rgba(110,231,160,0.22), rgba(110,231,160,0.10)) !important;
+  border: 1px solid rgba(110,231,160,0.5) !important;
+  color: #6ee7a0 !important;
+}
+.mr-btn-approve:hover {
+  background: linear-gradient(180deg, rgba(110,231,160,0.32), rgba(110,231,160,0.16)) !important;
+  border-color: rgba(110,231,160,0.7) !important;
+  color: #b9f5cf !important;
+}
+
+/* ── Responsive ──────────────────────────────────── */
+@media (max-width: 900px) {
+  .mr-page { padding: 32px 20px 80px; }
+  .mr-summary { grid-template-columns: repeat(2, 1fr); }
+  .mr-page-title { font-size: 28px; }
+  .mr-card-head { flex-direction: column; align-items: flex-start; }
+  .mr-card-meta { align-items: flex-start; }
+  .mr-table thead th, .mr-table tbody td { padding: 12px 16px; }
+}
+@media (max-width: 600px) {
+  .mr-summary { grid-template-columns: 1fr 1fr; }
+}
+`

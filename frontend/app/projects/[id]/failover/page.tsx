@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { apiClient } from '@/lib/api'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -10,22 +10,32 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
 export default function FailoverPage() {
-  const params = useParams()
+  const params    = useParams()
   const projectId = params.id as string
-  const router = useRouter()
+  const router    = useRouter()
 
-  const [mode, setMode]                 = useState<'simulation' | 'actual'>('simulation')
-  const [confirmName, setConfirmName]   = useState('')
-  const [isRunning, setIsRunning]       = useState(false)
-  const [error, setError]               = useState('')
+  const [mode, setMode]               = useState<'simulation' | 'actual'>('simulation')
+  const [confirmName, setConfirmName] = useState('')
+  const [projectName, setProjectName] = useState('')
+  const [isRunning, setIsRunning]     = useState(false)
+  const [error, setError]             = useState('')
   const [failoverData, setFailoverData] = useState<FailoverResponse | null>(null)
   const [simStep, setSimStep]           = useState(-1)
   const [logs, setLogs]                 = useState<string[]>([])
   const [destroyStatus, setDestroyStatus] = useState<'idle' | 'confirming' | 'destroying' | 'destroyed' | 'failed'>('idle')
-  const [destroyError, setDestroyError] = useState('')
+  const [destroyError, setDestroyError]   = useState('')
+
+  const processedEventsRef = useRef(0)
 
   const { data: packageData } = useDRPackage(projectId)
   const latest = packageData?.latest
+
+  useEffect(() => {
+    apiClient
+      .get(`/api/projects/${projectId}`)
+      .then((res) => setProjectName(res.data.data.name))
+      .catch(() => {})
+  }, [projectId])
 
   const SIMULATION_STEPS = [
     { label: 'Terraform Init',        duration: '2초' },
@@ -49,52 +59,54 @@ export default function FailoverPage() {
   // ── 시뮬레이션 단계 진행 ─────────────────────────────────────
   useEffect(() => {
     if (!isRunning || mode !== 'simulation') return
-
     if (simStep >= SIMULATION_STEPS.length - 1) {
       setIsRunning(false)
       return
     }
-
     const timer = setTimeout(() => setSimStep((s) => s + 1), 800)
     return () => clearTimeout(timer)
   }, [isRunning, simStep, mode])
 
   // ── WebSocket 이벤트 (actual 모드) ───────────────────────────
   useEffect(() => {
-    if (!events.length) return
-    const latest_event = events[events.length - 1]
+    const newEvents = events.slice(processedEventsRef.current)
+    if (!newEvents.length) return
+    processedEventsRef.current = events.length
 
-    if (latest_event.event_type === 'failover_progress') {
-      const data = latest_event.data as { current_resource?: string }
-      if (data.current_resource) {
-        setLogs((prev) => [...prev, data.current_resource!])
+    for (const event of newEvents) {
+      if (event.event_type === 'failover_progress') {
+        const data = event.data as { current_resource?: string; message?: string }
+        const line = data.current_resource ?? data.message
+        if (line) {
+          setLogs((prev) => [...prev, line])
+        }
       }
-    }
 
-    if (latest_event.event_type === 'failover_completed') {
-      const data = latest_event.data as {
-        gcp_resources_created?: number
-        actual_rto_seconds?: number
+      if (event.event_type === 'failover_completed') {
+        const data = event.data as {
+          gcp_resources_created?: number
+          actual_rto_seconds?: number
+        }
+        setIsRunning(false)
+        setLogs((prev) => [
+          ...prev,
+          `✅ GCP 페일오버 완료. 실제 RTO: ${
+            data.actual_rto_seconds
+              ? `${Math.floor(data.actual_rto_seconds / 60)}분 ${data.actual_rto_seconds % 60}초`
+              : '측정 중'
+          }`,
+        ])
       }
-      setIsRunning(false)
-      setLogs((prev) => [
-        ...prev,
-        `✅ GCP 페일오버 완료. 실제 RTO: ${
-          data.actual_rto_seconds
-            ? `${Math.floor(data.actual_rto_seconds / 60)}분 ${data.actual_rto_seconds % 60}초`
-            : '측정 중'
-        }`,
-      ])
-    }
 
-    if (latest_event.event_type === 'failover_failed') {
-      const data = latest_event.data as { error_message?: string }
-      setIsRunning(false)
-      setError(data.error_message ?? '페일오버 실행에 실패했습니다.')
-      setLogs((prev) => [
-        ...prev,
-        `❌ 페일오버 실패: ${data.error_message ?? '알 수 없는 오류'}`,
-      ])
+      if (event.event_type === 'failover_failed') {
+        const data = event.data as { error_message?: string }
+        setIsRunning(false)
+        setError(data.error_message ?? '페일오버 실행에 실패했습니다.')
+        setLogs((prev) => [
+          ...prev,
+          `❌ 페일오버 실패: ${data.error_message ?? '알 수 없는 오류'}`,
+        ])
+      }
     }
   }, [events])
 
@@ -111,6 +123,7 @@ export default function FailoverPage() {
     setLogs([])
     setDestroyStatus('idle')
     setDestroyError('')
+    processedEventsRef.current = 0
 
     try {
       const body: Record<string, string> = { mode }
@@ -128,7 +141,7 @@ export default function FailoverPage() {
     }
   }
 
-  // ── GCP 리소스 삭제 (폴링으로 실제 완료 확인) ────────────────
+  // ── GCP 리소스 삭제 ──────────────────────────────────────────
   const handleDestroyGcp = async () => {
     if (!failoverData) return
     setDestroyStatus('destroying')
@@ -138,39 +151,50 @@ export default function FailoverPage() {
       await apiClient.post(
         `/api/mirror/${projectId}/failover/${failoverData.failover_id}/destroy`
       )
-
-      // 실제 완료될 때까지 폴링 (10초 간격, 최대 10분)
-      for (let i = 0; i < 60; i++) {
-        await new Promise((r) => setTimeout(r, 10000))
-        try {
-          const res = await apiClient.get(
-            `/api/mirror/${projectId}/failover/${failoverData.failover_id}`
-          )
-          const fh = res.data.data
-          if (fh?.status === 'destroyed') {
-            setDestroyStatus('destroyed')
-            return
-          }
-          if (fh?.status === 'destroy_failed') {
-            setDestroyStatus('failed')
-            setDestroyError(fh.error_message ?? 'GCP 리소스 삭제에 실패했습니다.')
-            return
-          }
-        } catch {
-          // 폴링 실패 시 계속 재시도
-        }
-      }
-      // 10분 타임아웃
-      setDestroyStatus('failed')
-      setDestroyError('삭제 시간이 초과됐습니다. GCP 콘솔에서 직접 확인하세요.')
-
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: { message?: string } } } })
           ?.response?.data?.error?.message ?? 'GCP 리소스 삭제에 실패했습니다.'
       setDestroyError(msg)
       setDestroyStatus('failed')
+      return
     }
+
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 10000))
+      try {
+        const res = await apiClient.get(
+          `/api/mirror/${projectId}/failover/${failoverData.failover_id}`
+        )
+        const fh = res.data.data
+        if (fh?.status === 'destroyed') {
+          setDestroyStatus('destroyed')
+          return
+        }
+        if (fh?.status === 'destroy_failed') {
+          setDestroyStatus('failed')
+          setDestroyError(fh.error_message ?? 'GCP 리소스 삭제에 실패했습니다.')
+          return
+        }
+      } catch {
+        // 일시적 오류 — 계속 폴링
+      }
+    }
+
+    // 타임아웃 시 실제 상태 한 번 더 확인
+    try {
+      const res = await apiClient.get(
+        `/api/mirror/${projectId}/failover/${failoverData.failover_id}`
+      )
+      const fh = res.data.data
+      if (fh?.status === 'destroyed') {
+        setDestroyStatus('destroyed')
+        return
+      }
+    } catch {}
+
+    setDestroyStatus('failed')
+    setDestroyError('삭제 시간이 초과됐습니다. GCP 콘솔에서 직접 확인하세요.')
   }
 
   return (
@@ -200,7 +224,7 @@ export default function FailoverPage() {
       )}
 
       {/* 모드 선택 */}
-      {!isRunning && (
+      {!isRunning && !(mode === 'actual' && !error && logs.some(l => l.includes('완료'))) && (
         <div className="bg-[#121214] border border-white/8 rounded-3xl p-6 space-y-4">
           <div className="space-y-3">
             <label className="flex items-center gap-3 cursor-pointer">
@@ -237,9 +261,15 @@ export default function FailoverPage() {
               <Input
                 value={confirmName}
                 onChange={(e) => setConfirmName(e.target.value)}
-                placeholder="예: test-project"
+                placeholder={projectName || '프로젝트명 입력'}
                 className="bg-black/30 border-white/10 text-white placeholder:text-[#9ca3af]"
               />
+              {projectName && (
+                <p className="text-xs text-[#9ca3af]/60">
+                  입력값:{' '}
+                  <span className="text-yellow-400 font-mono">{projectName}</span>
+                </p>
+              )}
               <p className="text-xs text-[#9ca3af]/60">
                 대상 GCP 리전: us-west1 (오레곤) — 고정값
               </p>
@@ -285,7 +315,6 @@ export default function FailoverPage() {
                 )}
               </div>
             ))}
-
             {!isRunning && simStep >= SIMULATION_STEPS.length - 1 && (
               <div className="pt-3 border-t border-white/8">
                 <p className="text-emerald-400 font-semibold">
@@ -315,7 +344,7 @@ export default function FailoverPage() {
         </div>
       )}
 
-      {/* actual 완료 후 — 로그 + GCP 리소스 삭제 */}
+      {/* actual 완료/실패 후 — 로그 + GCP 리소스 관리 */}
       {!isRunning && mode === 'actual' && logs.length > 0 && (
         <div className="space-y-4 mt-4">
 
@@ -326,7 +355,7 @@ export default function FailoverPage() {
             </p>
             <div className="bg-black rounded-2xl p-4 h-32 overflow-y-auto font-mono text-xs">
               {logs.map((log, i) => (
-                <p key={i} className="text-emerald-400">{log}</p>
+                <p key={i} className={error ? 'text-red-400' : 'text-emerald-400'}>{log}</p>
               ))}
             </div>
           </div>
@@ -335,7 +364,9 @@ export default function FailoverPage() {
           <div className="bg-[#121214] border border-white/8 rounded-3xl p-6 space-y-3">
             <p className="text-sm font-semibold text-white">GCP 리소스 관리</p>
             <p className="text-xs text-[#9ca3af]">
-              페일오버 검증이 완료됐다면 GCP 리소스를 삭제해 비용을 절감하세요.
+              {error
+                ? '페일오버 실패로 인해 일부 GCP 리소스가 생성됐을 수 있습니다. 삭제하여 비용을 절감하세요.'
+                : '페일오버 검증이 완료됐다면 GCP 리소스를 삭제해 비용을 절감하세요.'}
             </p>
 
             {destroyStatus === 'idle' && (
@@ -375,7 +406,7 @@ export default function FailoverPage() {
 
             {destroyStatus === 'destroying' && (
               <p className="text-xs text-yellow-400 animate-pulse">
-                ⏳ GCP 리소스 삭제 중... (약 5~10분 소요, 완료까지 대기 중)
+                ⏳ GCP 리소스 삭제 중... (약 5~10분 소요)
               </p>
             )}
 
@@ -387,9 +418,7 @@ export default function FailoverPage() {
 
             {destroyStatus === 'failed' && (
               <div className="space-y-2">
-                <p className="text-xs text-red-400">
-                  ❌ 삭제에 실패했습니다.
-                </p>
+                <p className="text-xs text-red-400">❌ 삭제에 실패했습니다.</p>
                 {destroyError && (
                   <p className="text-xs text-red-400/70 font-mono bg-red-500/5 rounded-xl p-2">
                     {destroyError}
@@ -426,7 +455,7 @@ export default function FailoverPage() {
         </Button>
       )}
 
-      {/* actual 완료/실패 후 — 뒤로가기 + 페일오버 재시도 버튼 */}
+      {/* actual 완료/실패 후 — 뒤로가기 + 재시도 버튼 */}
       {!isRunning && mode === 'actual' && (error || logs.some(l => l.includes('완료'))) && (
         <div className="flex gap-2 mt-4">
           <Button

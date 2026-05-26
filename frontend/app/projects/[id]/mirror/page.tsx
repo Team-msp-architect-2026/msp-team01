@@ -1,7 +1,7 @@
 // frontend/app/projects/[id]/mirror/page.tsx
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { apiClient } from '@/lib/api'
 import { useDRStatus, useSyncHistory } from '@/hooks/useMirrorOps'
@@ -15,9 +15,9 @@ const DR_STATUS_CONFIG: Record<string, { label: string; tone: DrTone }> = {
 
 type PkgTone = 'green' | 'yellow' | 'red'
 const PACKAGE_STATUS_CONFIG: Record<string, { label: string; tone: PkgTone }> = {
-  ready:     { label: '준비 완료',                                  tone: 'green' },
-  preparing: { label: '준비 중 (DB 스냅샷 Export 진행 중...)',       tone: 'yellow' },
-  failed:    { label: '생성 실패',                                  tone: 'red' },
+  ready:     { label: '준비 완료',                            tone: 'green' },
+  preparing: { label: '준비 중 (DB 스냅샷 Export 진행 중...)', tone: 'yellow' },
+  failed:    { label: '생성 실패',                            tone: 'red' },
 }
 
 const TRIGGER_LABEL: Record<string, string> = {
@@ -33,6 +33,18 @@ interface ProjectInfo {
   environment?: string
 }
 
+interface FailoverRecord {
+  failover_id:           string
+  mode:                  string
+  status:                string
+  gcp_region:            string
+  gcp_resources_created: number | null
+  actual_rto_seconds:    number | null
+  error_message:         string | null
+  started_at:            string
+  completed_at:          string | null
+}
+
 export default function MirrorDashboardPage() {
   const params    = useParams()
   const projectId = params.id as string
@@ -41,8 +53,15 @@ export default function MirrorDashboardPage() {
   const { data: drStatus, isLoading, error, refetch } = useDRStatus(projectId)
   const { data: history } = useSyncHistory(projectId)
 
-  // ─ project name (auto-fetched, header에 표시) ─────────────────
-  const [project, setProject] = useState<ProjectInfo | null>(null)
+  const [project, setProject]             = useState<ProjectInfo | null>(null)
+  const [syncError, setSyncError]         = useState<string | null>(null)
+  const [isSyncing, setIsSyncing]         = useState(false)
+
+  // ── GCP 리소스 관리 상태 ─────────────────────────────────────────
+  const [latestFailover, setLatestFailover]   = useState<FailoverRecord | null>(null)
+  const [destroyStatus, setDestroyStatus] = useState<'idle' | 'confirming' | 'destroying' | 'destroyed' | 'failed'>('idle')
+  const [destroyError, setDestroyError]       = useState('')
+
   useEffect(() => {
     apiClient
       .get(`/api/projects/${projectId}`)
@@ -50,8 +69,86 @@ export default function MirrorDashboardPage() {
       .catch(() => {})
   }, [projectId])
 
-  const [syncError, setSyncError] = useState<string | null>(null)
-  const [isSyncing, setIsSyncing] = useState(false)
+  // 페일오버 이력 조회 — 페이지 진입 시 GCP 리소스 상태 복원
+  const fetchLatestFailover = useCallback(async () => {
+    try {
+      const res  = await apiClient.get(`/api/mirror/${projectId}/failover-history`)
+      const list: FailoverRecord[] = res.data.data ?? []
+      const latest = list.find((f) => f.mode === 'actual') ?? null
+      setLatestFailover(latest)
+
+      if (latest?.status === 'completed') setDestroyStatus('idle')
+      else if (latest?.status === 'destroying') setDestroyStatus('destroying')
+      else if (latest?.status === 'destroyed') setDestroyStatus('destroyed')
+      else if (latest?.status === 'destroy_failed') {
+        setDestroyStatus('failed')
+        setDestroyError(latest.error_message ?? 'GCP 리소스 삭제에 실패했습니다.')
+      }
+    } catch {
+      // 이력 없음
+    }
+  }, [projectId])
+
+  useEffect(() => { fetchLatestFailover() }, [fetchLatestFailover])
+
+  useEffect(() => {
+    if (destroyStatus !== 'failed') return
+    const timer = setTimeout(async () => {
+      await fetchLatestFailover()
+    }, 3000)
+    return () => clearTimeout(timer)
+  }, [destroyStatus, fetchLatestFailover])
+
+  // ── GCP 리소스 삭제 ──────────────────────────────────────────────
+  const handleDestroyGcp = async () => {
+    if (!latestFailover) return
+    const failoverId = latestFailover.failover_id
+    setDestroyStatus('destroying')
+    setDestroyError('')
+
+    try {
+      await apiClient.post(
+        `/api/mirror/${projectId}/failover/${failoverId}/destroy`
+      )
+    } catch (err: unknown) {
+      const status = (err as any)?.response?.status
+
+      if (status === 409) {
+        await fetchLatestFailover()
+        return
+      }
+
+      const msg =
+        (err as { response?: { data?: { error?: { message?: string } } } })
+          ?.response?.data?.error?.message ?? 'GCP 리소스 삭제에 실패했습니다.'
+      setDestroyError(msg)
+      setDestroyStatus('failed')
+      return
+    }
+
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 10000))
+      try {
+        const res = await apiClient.get(
+          `/api/mirror/${projectId}/failover/${failoverId}`
+        )
+        const fh = res.data.data
+        if (fh?.status === 'destroyed') {
+          setDestroyStatus('destroyed')
+          return
+        }
+        if (fh?.status === 'destroy_failed') {
+          setDestroyStatus('failed')
+          setDestroyError(fh.error_message ?? 'GCP 리소스 삭제에 실패했습니다.')
+          return
+        }
+      } catch {
+        // 컨테이너 교체 등 일시적 오류 — 계속 폴링
+      }
+    }
+
+    await fetchLatestFailover()
+  }
 
   const handleManualSync = async () => {
     setSyncError(null)
@@ -111,6 +208,10 @@ export default function MirrorDashboardPage() {
   const awsRegion = project?.region ?? 'us-west-2'
   const drReady   = statusKey === 'ready'
 
+  // GCP 리소스 관리 섹션 표시 조건
+  const showGcpManagement = latestFailover &&
+    ['completed', 'failed', 'destroying', 'destroyed', 'destroy_failed'].includes(latestFailover.status)
+
   return (
     <>
       <style>{styles}</style>
@@ -159,6 +260,121 @@ export default function MirrorDashboardPage() {
           </div>
         )}
 
+        {/* GCP 리소스 관리 섹션 */}
+        {showGcpManagement && (
+          <div className="mr-section mr-section-gcp">
+            <div className="mr-section-head">
+              <span className="mr-card-eyebrow" style={{ '--mr-accent': '#ffa53d' } as React.CSSProperties}>
+                <span className="mr-pip" style={{ background: '#ffa53d', boxShadow: '0 0 8px #ffa53d' }} />
+                GCP 리소스 관리
+              </span>
+              {latestFailover?.actual_rto_seconds && (
+                <span className="mr-count">
+                  실제 RTO {Math.floor(latestFailover.actual_rto_seconds / 60)}분 {latestFailover.actual_rto_seconds % 60}초
+                </span>
+              )}
+            </div>
+
+            <div className="mr-gcp-info">
+              <div>
+                <div className="mr-label">페일오버 ID</div>
+                <div className="mr-mono mr-value" style={{ fontSize: 12 }}>{latestFailover?.failover_id}</div>
+              </div>
+              <div>
+                <div className="mr-label">GCP 리전</div>
+                <div className="mr-mono mr-value">{latestFailover?.gcp_region ?? 'us-west1'}</div>
+              </div>
+              <div>
+                <div className="mr-label">생성된 리소스</div>
+                <div className="mr-mono mr-value">{latestFailover?.gcp_resources_created ?? '-'}개</div>
+              </div>
+              <div>
+                <div className="mr-label">페일오버 시각</div>
+                <div className="mr-mono mr-value" style={{ fontSize: 12 }}>
+                  {latestFailover?.started_at
+                    ? new Date(latestFailover.started_at).toLocaleString('ko-KR', {
+                        timeZone: 'Asia/Seoul',
+                      })
+                    : '-'}
+                </div>
+              </div>
+            </div>
+
+            <div className="mr-divider" />
+
+            {destroyStatus === 'idle' && (
+              <div className="mr-gcp-action">
+                <p className="mr-gcp-desc">
+                  페일오버 검증이 완료됐다면 GCP 리소스를 삭제해 비용을 절감하세요.
+                </p>
+                <button
+                  className="mr-btn mr-btn-destroy"
+                  onClick={() => setDestroyStatus('confirming')}
+                >
+                  🗑️ GCP 리소스 삭제
+                </button>
+              </div>
+            )}
+
+            {destroyStatus === 'confirming' && (
+              <div className="mr-confirm-box">
+                <p className="mr-confirm-text">
+                  ⚠️ GCP에 생성된 모든 리소스가 삭제됩니다. 계속하시겠습니까?
+                </p>
+                <div className="mr-confirm-btns">
+                  <button className="mr-btn mr-btn-danger" onClick={handleDestroyGcp}>
+                    삭제 확인
+                  </button>
+                  <button
+                    className="mr-btn mr-btn-ghost"
+                    onClick={() => setDestroyStatus('idle')}
+                  >
+                    취소
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {destroyStatus === 'destroying' && (
+              <div className="mr-gcp-action">
+                <span className="mr-status" data-tone="yellow">
+                  <span className="mr-status-pip" />
+                  <span className="mr-spinner-sm" style={{ marginRight: 4 }} />
+                  GCP 리소스 삭제 중... (약 5~10분 소요)
+                </span>
+              </div>
+            )}
+
+            {destroyStatus === 'destroyed' && (
+              <div className="mr-gcp-action">
+                <span className="mr-status" data-tone="green">
+                  <span className="mr-status-pip" />
+                  ✅ GCP 리소스가 모두 삭제됐습니다.
+                </span>
+              </div>
+            )}
+
+            {destroyStatus === 'failed' && (
+              <div className="mr-gcp-action">
+                <span className="mr-status" data-tone="red">
+                  <span className="mr-status-pip" />
+                  ❌ 삭제에 실패했습니다.
+                </span>
+                {destroyError && (
+                  <p className="mr-destroy-err">{destroyError}</p>
+                )}
+                <button
+                  className="mr-btn mr-btn-destroy"
+                  style={{ marginTop: 8 }}
+                  onClick={() => { setDestroyStatus('confirming'); setDestroyError('') }}
+                >
+                  🔄 삭제 재시도
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* AWS Primary / GCP Standby */}
         <div className="mr-split">
           <div className="mr-card" data-tone="orange">
@@ -190,9 +406,11 @@ export default function MirrorDashboardPage() {
             </div>
             <div className="mr-card-row">
               {drReady ? (
-                <span className="mr-status" data-tone="yellow">
+                <span className="mr-status" data-tone={
+                  latestFailover?.status === 'completed' ? 'green' : 'yellow'
+                }>
                   <span className="mr-status-pip" />
-                  대기 중
+                  {latestFailover?.status === 'completed' ? '운영 중 (페일오버)' : '대기 중'}
                 </span>
               ) : (
                 <span className="mr-status" data-tone="mute">
@@ -237,7 +455,6 @@ export default function MirrorDashboardPage() {
           {pkg && (
             <>
               <div className="mr-divider" />
-
               <div className="mr-pkg-row">
                 <div>
                   <div className="mr-label">DR Package 구성</div>
@@ -246,7 +463,6 @@ export default function MirrorDashboardPage() {
                     {pkgStatusConfig?.label ?? '확인 중'}
                   </span>
                 </div>
-
                 <div className="mr-kpi-pair">
                   <div className="mr-kpi-cell">
                     <div className="mr-label">RTO</div>
@@ -363,7 +579,7 @@ export default function MirrorDashboardPage() {
                   return (
                     <tr key={h.sync_id}>
                       <td className="mr-mono mr-cell-dim">
-                        {new Date(h.started_at).toLocaleString('ko-KR')}
+                        {new Date(h.started_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}
                       </td>
                       <td className="mr-cell-dim">
                         {TRIGGER_LABEL[h.trigger_type] ?? h.trigger_type}
@@ -558,7 +774,6 @@ body::before {
 .mr-error-msg { font-size: 13px; color: #aeb4c5; line-height: 1.5; margin-bottom: 12px; }
 .mr-mt { margin-top: 8px; }
 
-/* Page head */
 .mr-head {
   display: flex; align-items: flex-start; justify-content: space-between;
   gap: 24px; flex-wrap: wrap;
@@ -582,20 +797,12 @@ body::before {
 }
 .mr-title {
   font-family: 'Plus Jakarta Sans', sans-serif;
-  font-weight: 700;
-  font-size: 36px;
-  letter-spacing: -0.03em;
-  line-height: 1.1;
-  margin: 0 0 12px;
-  color: #edf0f6;
+  font-weight: 700; font-size: 36px;
+  letter-spacing: -0.03em; line-height: 1.1;
+  margin: 0 0 12px; color: #edf0f6;
 }
-.mr-sub {
-  font-size: 14.5px;
-  color: #aeb4c5;
-  margin: 0; line-height: 1.55;
-}
+.mr-sub { font-size: 14.5px; color: #aeb4c5; margin: 0; line-height: 1.55; }
 
-/* Buttons */
 .mr-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 9px;
   padding: 11px 18px;
@@ -611,39 +818,36 @@ body::before {
 }
 .mr-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.20); }
 .mr-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.mr-btn-secondary {
-  background: rgba(255,255,255,0.03);
-  color: #aeb4c5;
-}
+.mr-btn-secondary { background: rgba(255,255,255,0.03); color: #aeb4c5; }
 .mr-btn-secondary:hover:not(:disabled) { color: #edf0f6; }
-.mr-btn-ghost {
-  background: transparent;
-  border-color: rgba(255,255,255,0.13);
-  color: #aeb4c5;
-}
+.mr-btn-ghost { background: transparent; border-color: rgba(255,255,255,0.13); color: #aeb4c5; }
 .mr-btn-danger {
   background: linear-gradient(180deg, rgba(255,118,118,0.18), rgba(255,118,118,0.10));
-  border-color: rgba(255,118,118,0.45);
-  color: #ff7676;
-  font-weight: 700;
+  border-color: rgba(255,118,118,0.45); color: #ff7676; font-weight: 700;
 }
 .mr-btn-danger:hover:not(:disabled) {
   background: linear-gradient(180deg, rgba(255,118,118,0.25), rgba(255,118,118,0.15));
   border-color: rgba(255,118,118,0.6);
   box-shadow: 0 0 30px -10px rgba(255,118,118,0.5);
 }
+.mr-btn-destroy {
+  background: rgba(255,165,61,0.08);
+  border-color: rgba(255,165,61,0.3);
+  color: #ffa53d; font-weight: 600;
+}
+.mr-btn-destroy:hover:not(:disabled) {
+  background: rgba(255,165,61,0.14);
+  border-color: rgba(255,165,61,0.5);
+}
 .mr-flex { flex: 1; }
 .mr-arrow { font-family: 'JetBrains Mono', ui-monospace, monospace; display: inline-block; }
 
-/* Alert */
 .mr-alert {
   display: flex; gap: 10px; align-items: center;
-  padding: 12px 14px;
-  border-radius: 10px;
+  padding: 12px 14px; border-radius: 10px;
   border: 1px solid rgba(255,118,118,0.3);
   background: rgba(255,118,118,0.06);
-  color: #ff7676;
-  font-size: 13px; line-height: 1.5;
+  color: #ff7676; font-size: 13px; line-height: 1.5;
   margin-bottom: 20px;
 }
 .mr-alert-ico {
@@ -654,16 +858,12 @@ body::before {
   font-weight: 700; font-size: 11px;
 }
 
-/* AWS / GCP split cards */
 .mr-split {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  margin-bottom: 18px;
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 14px; margin-bottom: 18px;
 }
 .mr-card {
-  position: relative;
-  padding: 22px;
+  position: relative; padding: 22px;
   border-radius: 16px;
   border: 1px solid rgba(255,255,255,0.13);
   background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
@@ -671,8 +871,7 @@ body::before {
 }
 .mr-card::before {
   content: ""; position: absolute;
-  top: 0; left: 28px; right: 28px;
-  height: 1px;
+  top: 0; left: 28px; right: 28px; height: 1px;
   background: linear-gradient(90deg, transparent, var(--mr-accent, rgba(255,255,255,0.5)), transparent);
 }
 .mr-card[data-tone="orange"] {
@@ -701,8 +900,7 @@ body::before {
 .mr-card-eyebrow .mr-pip { background: var(--mr-accent, #5aa3ff); box-shadow: 0 0 8px var(--mr-accent, #5aa3ff); }
 .mr-region {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px; color: #7a8298;
-  letter-spacing: 0.06em;
+  font-size: 11px; color: #7a8298; letter-spacing: 0.06em;
 }
 .mr-card-row {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
@@ -710,23 +908,16 @@ body::before {
 .mr-stat-num {
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-weight: 700; font-size: 28px;
-  letter-spacing: -0.025em;
-  color: #edf0f6;
-  line-height: 1;
+  letter-spacing: -0.025em; color: #edf0f6; line-height: 1;
 }
 .mr-stat-num small {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 12px;
-  color: #7a8298;
-  font-weight: 500;
-  margin-left: 4px;
+  font-size: 12px; color: #7a8298; font-weight: 500; margin-left: 4px;
 }
 
-/* Status pip / label */
 .mr-status {
   display: inline-flex; align-items: center; gap: 8px;
-  font-size: 13.5px; font-weight: 500;
-  color: #aeb4c5;
+  font-size: 13.5px; font-weight: 500; color: #aeb4c5;
 }
 .mr-status-lg { font-size: 16px; font-weight: 600; }
 .mr-status .mr-status-pip { width: 7px; height: 7px; border-radius: 50%; }
@@ -739,21 +930,23 @@ body::before {
 .mr-status[data-tone="red"] .mr-status-pip    { background: #ff7676; box-shadow: 0 0 8px #ff7676; }
 .mr-status[data-tone="yellow"] { color: #f5d061; }
 .mr-status[data-tone="yellow"] .mr-status-pip { background: #f5d061; box-shadow: 0 0 8px #f5d061; }
-.mr-status[data-tone="orange"] { color: #ffa53d; }
-.mr-status[data-tone="orange"] .mr-status-pip { background: #ffa53d; box-shadow: 0 0 8px #ffa53d; animation: mr-pulse 1.6s ease-in-out infinite; }
 .mr-status[data-tone="mute"] .mr-status-pip { background: #7a8298; }
 @keyframes mr-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.55; transform: scale(0.85); }
 }
 
-/* Section */
 .mr-section {
-  padding: 24px 26px;
-  border-radius: 16px;
+  padding: 24px 26px; border-radius: 16px;
   border: 1px solid rgba(255,255,255,0.13);
   background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
   margin-bottom: 18px;
+}
+.mr-section-gcp {
+  border-color: rgba(255,165,61,0.25);
+  background:
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(255,165,61,0.05), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
 }
 .mr-section-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -761,88 +954,80 @@ body::before {
 }
 .mr-count {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px; color: #7a8298;
-  letter-spacing: 0.1em;
-  padding: 4px 10px;
-  border-radius: 100px;
+  font-size: 11px; color: #7a8298; letter-spacing: 0.1em;
+  padding: 4px 10px; border-radius: 100px;
   border: 1px solid rgba(255,255,255,0.13);
   background: rgba(255,255,255,0.04);
 }
-
 .mr-label {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.14em; text-transform: uppercase;
-  color: #7a8298;
-  margin-bottom: 8px;
+  color: #7a8298; margin-bottom: 8px;
 }
-.mr-value {
-  font-size: 13px;
-  color: #edf0f6;
-  font-weight: 500;
-}
+.mr-value { font-size: 13px; color: #edf0f6; font-weight: 500; }
 .mr-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
 .mr-text-right { text-align: right; }
+
+.mr-gcp-info {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 16px; margin-bottom: 4px;
+}
+.mr-gcp-action {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.mr-gcp-desc { font-size: 13px; color: #aeb4c5; margin: 0 0 8px; }
+.mr-confirm-box {
+  padding: 14px 16px; border-radius: 10px;
+  border: 1px solid rgba(255,118,118,0.25);
+  background: rgba(255,118,118,0.05);
+}
+.mr-confirm-text { font-size: 13px; color: #ff7676; margin: 0 0 12px; }
+.mr-confirm-btns { display: flex; gap: 8px; }
+.mr-destroy-err {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; color: rgba(255,118,118,0.7);
+  background: rgba(255,118,118,0.05);
+  border-radius: 8px; padding: 8px 10px;
+  margin: 4px 0 0; line-height: 1.5;
+}
 
 .mr-status-row {
   display: flex; align-items: center; justify-content: space-between;
   gap: 18px; flex-wrap: wrap;
 }
-.mr-divider {
-  height: 1px;
-  background: rgba(255,255,255,0.08);
-  margin: 20px 0;
-}
-
+.mr-divider { height: 1px; background: rgba(255,255,255,0.08); margin: 20px 0; }
 .mr-pkg-row {
   display: flex; align-items: center; justify-content: space-between;
   gap: 18px; flex-wrap: wrap;
 }
-.mr-kpi-pair {
-  display: flex; gap: 24px;
-}
-.mr-kpi-cell {
-  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
-}
+.mr-kpi-pair { display: flex; gap: 24px; }
+.mr-kpi-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .mr-kpi-val {
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-weight: 700; font-size: 22px;
-  letter-spacing: -0.02em;
-  color: #6ee7a0;
-  line-height: 1;
+  letter-spacing: -0.02em; color: #6ee7a0; line-height: 1;
 }
 .mr-kpi-val small {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 11px;
-  color: #7a8298;
-  font-weight: 500;
-  margin-left: 3px;
+  font-size: 11px; color: #7a8298; font-weight: 500; margin-left: 3px;
 }
 
-/* Preparing block */
 .mr-preparing {
-  margin-top: 16px;
-  padding: 14px 16px;
-  border-radius: 10px;
+  margin-top: 16px; padding: 14px 16px; border-radius: 10px;
   border: 1px solid rgba(245,208,97,0.22);
   background: rgba(245,208,97,0.05);
 }
 .mr-preparing-head {
   display: flex; align-items: center; gap: 10px;
   font-family: 'Plus Jakarta Sans', sans-serif;
-  font-weight: 600; font-size: 13.5px;
-  color: #f5d061;
-  margin-bottom: 10px;
+  font-weight: 600; font-size: 13.5px; color: #f5d061; margin-bottom: 10px;
 }
 .mr-preparing-list {
   display: flex; flex-direction: column; gap: 6px;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 12px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px;
 }
-.mr-prep-item {
-  display: flex; align-items: center; gap: 8px;
-  color: rgba(245,208,97,0.7);
-}
+.mr-prep-item { display: flex; align-items: center; gap: 8px; color: rgba(245,208,97,0.7); }
 .mr-prep-item.mr-done { color: #6ee7a0; }
 .mr-check {
   width: 14px; height: 14px; border-radius: 50%;
@@ -851,49 +1036,31 @@ body::before {
   font-size: 10px; font-weight: 700;
 }
 
-.mr-action-row {
-  display: flex; gap: 10px; flex-wrap: wrap;
-}
+.mr-action-row { display: flex; gap: 10px; flex-wrap: wrap; }
 
-/* Empty */
-.mr-empty {
-  padding: 40px 24px;
-  text-align: center;
-}
+.mr-empty { padding: 40px 24px; text-align: center; }
 .mr-empty-mark {
-  width: 44px; height: 44px;
-  margin: 0 auto 12px;
-  border-radius: 11px;
-  border: 1px dashed rgba(255,255,255,0.20);
-  display: grid; place-items: center;
-  color: #7a8298;
+  width: 44px; height: 44px; margin: 0 auto 12px;
+  border-radius: 11px; border: 1px dashed rgba(255,255,255,0.20);
+  display: grid; place-items: center; color: #7a8298;
 }
 .mr-empty-text { font-size: 13px; color: #aeb4c5; }
 
-/* History table */
-.mr-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
+.mr-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .mr-table thead th {
-  text-align: left;
-  padding: 12px 14px;
+  text-align: left; padding: 12px 14px;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.14em; text-transform: uppercase;
   color: #aeb4c5;
   background: rgba(255,255,255,0.025);
   border-bottom: 1px solid rgba(255,255,255,0.13);
-  border-radius: 0;
 }
 .mr-table thead th:first-child { padding-left: 18px; border-top-left-radius: 10px; }
-.mr-table thead th:last-child { padding-right: 18px; border-top-right-radius: 10px; }
+.mr-table thead th:last-child  { padding-right: 18px; border-top-right-radius: 10px; }
 .mr-th-right { text-align: right !important; }
 .mr-table tbody td {
-  padding: 14px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-  vertical-align: middle;
+  padding: 14px; border-bottom: 1px solid rgba(255,255,255,0.06); vertical-align: middle;
 }
 .mr-table tbody td:first-child { padding-left: 18px; }
 .mr-table tbody td:last-child  { padding-right: 18px; }
@@ -912,5 +1079,6 @@ body::before {
   .mr-kpi-pair { gap: 20px; }
   .mr-kpi-cell { align-items: flex-start; }
   .mr-action-row { flex-direction: column; }
+  .mr-gcp-info { grid-template-columns: repeat(2, 1fr); }
 }
 `

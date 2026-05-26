@@ -11,6 +11,29 @@ NOT_REQUIRED_RESOURCES = {
     "AWS::KMS::Key",
 }
 
+
+# ── terraform 참조 헬퍼 ──────────────────────────────────────────────
+
+def _vpc_ref(cfg: dict) -> str:
+    """이름 태그에서 VPC terraform 참조 생성 (network 필드용)"""
+    name_tag = (cfg.get("tags") or {}).get("Name", "")
+    if name_tag:
+        vpc_name = "-".join(name_tag.lower().replace("_", "-").split("-")[:2]) + "-vpc"
+    else:
+        vpc_name = "default-vpc"
+    return f"__ref__google_compute_network.{vpc_name.replace('-', '_')}.id"
+
+
+def _router_ref(cfg: dict) -> str:
+    """이름 태그에서 Router terraform 참조 생성 (NAT router 필드용)"""
+    name_tag = (cfg.get("tags") or {}).get("Name", "")
+    if name_tag:
+        router_name = "-".join(name_tag.lower().replace("_", "-").split("-")[:2]) + "-rt-public"
+    else:
+        router_name = "cloud-router"
+    return f"__ref__google_compute_router.{router_name.replace('-', '_')}.name"
+
+
 # §5-2 AWS→GCP 매핑 테이블
 RULE_BASED_MAP: dict[str, dict] = {
     "AWS::EC2::VPC": {
@@ -35,15 +58,8 @@ RULE_BASED_MAP: dict[str, dict] = {
             ).lower().replace("_", "-"),
             "ip_cidr_range": cfg.get("cidrBlock", ""),
             "region":        "us-west1",
-            # [수정] 이름 태그 앞 두 파트로 VPC명 추론 (AWS VPC ID 사용 금지)
-            "network": (
-                "-".join(
-                    (cfg.get("tags") or {}).get("Name", "")
-                    .lower().replace("_", "-").split("-")[:2]
-                ) + "-vpc"
-                if (cfg.get("tags") or {}).get("Name", "")
-                else "default-vpc"
-            ),
+            # [수정] terraform 참조 — VPC 생성 완료 후 서브넷 생성되도록 의존성 설정
+            "network": _vpc_ref(cfg),
         },
     },
     "AWS::EC2::RouteTable": {
@@ -55,34 +71,20 @@ RULE_BASED_MAP: dict[str, dict] = {
                 "router-" + cfg.get("routeTableId", "default")
             ).lower().replace("_", "-"),
             "region": "us-west1",
-            # [수정] 이름 태그 앞 두 파트로 VPC명 추론
-            "network": (
-                "-".join(
-                    (cfg.get("tags") or {}).get("Name", "")
-                    .lower().replace("_", "-").split("-")[:2]
-                ) + "-vpc"
-                if (cfg.get("tags") or {}).get("Name", "")
-                else "default-vpc"
-            ),
+            # [수정] terraform 참조
+            "network": _vpc_ref(cfg),
         },
     },
     "AWS::EC2::NatGateway": {
         "gcp_type":   "google_compute_router_nat",
         "confidence": "auto",
         "mapping":    lambda cfg: {
-            # [수정] name, router 모두 이름 태그에서 동적 추론
             "name": (
                 (cfg.get("tags") or {}).get("Name", "") or
                 "cloud-nat"
             ).lower().replace("_", "-"),
-            "router": (
-                "-".join(
-                    (cfg.get("tags") or {}).get("Name", "")
-                    .lower().replace("_", "-").split("-")[:2]
-                ) + "-rt-public"
-                if (cfg.get("tags") or {}).get("Name", "")
-                else "cloud-router"
-            ),
+            # [수정] terraform 참조 — Router 생성 완료 후 NAT 생성되도록 의존성 설정
+            "router": _router_ref(cfg),
             "region":                             "us-west1",
             "nat_ip_allocate_option":             "AUTO_ONLY",
             "source_subnetwork_ip_ranges_to_nat": "ALL_SUBNETWORKS_ALL_IP_RANGES",
@@ -273,10 +275,10 @@ class MappingEngine:
         direction = info.get("direction", "INGRESS")
         rules     = info.get("rules", [{"protocol": "all", "source_ranges": ["0.0.0.0/0"]}])
 
-        name_parts = name.split("-")
-        vpc_name = "default"
-        if len(name_parts) >= 2:
-            vpc_name = f"{name_parts[0]}-{name_parts[1]}-vpc".lower()
+        # [수정] firewall도 terraform 참조 사용
+        name_parts  = name.split("-")
+        vpc_name    = f"{name_parts[0]}-{name_parts[1]}-vpc".lower() if len(name_parts) >= 2 else "default-vpc"
+        vpc_tf_name = vpc_name.replace("-", "_")
 
         if not isinstance(rules, list):
             rules = [{"protocol": "all", "source_ranges": ["0.0.0.0/0"]}]
@@ -300,7 +302,7 @@ class MappingEngine:
 
         return f'''resource "google_compute_firewall" "{tf_name}" {{
   name          = "{gcp_name}"
-  network       = "{vpc_name}"
+  network       = google_compute_network.{vpc_tf_name}.name
   direction     = "{direction}"
   source_ranges = {source_ranges}
 {allow_blocks}
@@ -323,9 +325,9 @@ class MappingEngine:
     def _generate_cloud_run_hcl(self, name: str, info: dict) -> str:
         gcp_name = name.lower().replace("_", "-")
         tf_name  = gcp_name.replace("-", "_")
-        image    = info.get("image", "gcr.io/cloudrun/hello")
-        cpu      = info.get("cpu", "1000m")
-        memory   = info.get("memory", "512Mi")
+        image = info.get("image") or "gcr.io/cloudrun/hello"
+        cpu    = info.get("cpu") or "1000m"
+        memory = info.get("memory") or "512Mi"
         port     = info.get("port", 8080)
 
         env_block = ""
@@ -423,6 +425,9 @@ class MappingEngine:
                     lines.append(f'{pad}{k} = {str(v).lower()}')
                 elif isinstance(v, (int, float)):
                     lines.append(f'{pad}{k} = {v}')
+                # [수정] __ref__ 접두사 → terraform 참조 (따옴표 없이 출력)
+                elif isinstance(v, str) and v.startswith("__ref__"):
+                    lines.append(f'{pad}{k} = {v[7:]}')
                 else:
                     lines.append(f'{pad}{k} = "{v}"')
             return "\n".join(lines)

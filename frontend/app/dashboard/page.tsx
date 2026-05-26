@@ -27,10 +27,6 @@ const DR_STATUS_CONFIG: Record<string, StatusConf> = {
   not_ready: { text: '동기화 필요',  tone: 'mute' },
 }
 
-// AWS / GCP per-project resource counts (from §spec)
-const AWS_RES_PER_PROJECT = 16
-const GCP_DR_RES_PER_PROJECT = 11
-
 // Filter chips
 type FilterKey = 'all' | 'active' | 'deploying' | 'failed'
 
@@ -122,9 +118,11 @@ export default function DashboardPage() {
     ? Math.round((drReadyCount / projects.length) * 100)
     : 0
   const activeCount  = projects.filter((p) => p.status === 'completed').length
-  const totalAws     = projects.length * AWS_RES_PER_PROJECT
-  const totalDrAvail = projects.length * GCP_DR_RES_PER_PROJECT
-  const totalDrLive  = drReadyCount * GCP_DR_RES_PER_PROJECT
+  const totalAws     = projects.reduce((s, p) => s + ((p as any).aws_resource_count ?? 0), 0)
+  const totalDrAvail = projects.reduce((s, p) => s + ((p as any).gcp_resource_count ?? 0), 0)
+  const totalDrLive  = projects
+    .filter((p) => p.dr_status === 'ready')
+    .reduce((s, p) => s + (p.gcp_resource_count ?? 0), 0)
 
   // unique regions string
   const regionsText = useMemo(() => {
