@@ -125,6 +125,15 @@ def manual_sync(
                 "message": "인프라 배포가 완료된 프로젝트만 동기화할 수 있습니다."
             }
         )
+    # GCP 연동 확인
+    if not project.gcp_project_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code":    "GCP_NOT_CONNECTED",
+                "message": "GCP 계정을 먼저 연동해야 합니다. 프로젝트 설정에서 GCP 연동을 진행해주세요.",
+            },
+        )
     
     from app.services.mirrorops.pipeline import MirrorOpsPipelineService
     pipeline = MirrorOpsPipelineService()
@@ -281,6 +290,16 @@ def failover(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "VALIDATION_ERROR", "message": "mode는 simulation 또는 actual이어야 합니다."},
+        )
+    
+    # GCP 연동 확인 (simulation/actual 모두 차단)
+    if not project.gcp_secret_arn:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code":    "GCP_NOT_CONNECTED",
+                "message": "GCP 계정을 먼저 연동해야 합니다. 프로젝트 설정에서 GCP 연동을 진행해주세요.",
+            },
         )
 
     latest_package = None
@@ -517,10 +536,13 @@ async def _run_failover_actual(
         s3.download_file("autoops-dr-packages", tf_key, str(Path(work_dir) / "main.tf"))
         _log("main.tf 다운로드 완료")
 
+        # gcp_project_id 결정 — 연동된 프로젝트 우선
+        gcp_project_id = project.gcp_project_id or settings.gcp_project_id
+
         # ② GCP 인증
         _log("GCP 인증 설정 중...")
-        setup_gcp_auth()
-        _log(f"GCP 인증 완료 (프로젝트: {settings.gcp_project_id})")
+        setup_gcp_auth(project=project)
+        _log(f"GCP 인증 완료 (프로젝트: {gcp_project_id})")
 
         # ③ GCS State 버킷 생성
         bucket_name = f"autoops-dr-state-{project_id}"
@@ -594,7 +616,7 @@ async def _run_failover_actual(
             project_id  = project_id,
             package     = package,
             bucket_name = bucket_name,
-            gcp_project = settings.gcp_project_id,
+            gcp_project = gcp_project_id,
             log_fn      = _log,
         )
         _log("✅ Cloud SQL 데이터 복원 완료")
@@ -884,6 +906,11 @@ async def _run_failover_destroy(
 
     db       = SessionLocal()
     work_dir = None
+    # project 조회 (gcp_secret_arn 사용을 위해)
+    from app.models.project import Project as ProjectModel
+    project = db.query(ProjectModel).filter(
+        ProjectModel.project_id == project_id
+    ).first()
     cw       = boto3.client("logs", region_name="us-west-2")
     log_group = f"/autoops/failover/{failover_id}"
 
@@ -924,7 +951,7 @@ async def _run_failover_destroy(
 
         # ② GCP 인증
         _log("GCP 인증 설정 중...")
-        setup_gcp_auth()
+        setup_gcp_auth(project=project)
         _log("GCP 인증 완료")
 
         env = {**os.environ, "TF_IN_AUTOMATION": "1"}

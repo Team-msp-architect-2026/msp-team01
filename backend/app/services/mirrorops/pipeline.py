@@ -29,9 +29,6 @@ class MirrorOpsPipelineService:
         파이프라인을 실행하고 sync_id를 반환한다.
         Phase 1이 완료되면 즉시 반환한다 (Phase 2는 비동기).
         """
-        # GCP 인증 설정 (§5-4)
-        setup_gcp_auth()
-
         # 프로젝트 및 AWS 계정 조회
         project = db.query(Project).filter(
             Project.project_id == project_id
@@ -40,13 +37,17 @@ class MirrorOpsPipelineService:
             AWSAccount.account_id == project.account_id
         ).first()
 
+        # GCP 인증 설정 — project별 SA 키 사용
+        gcp_project_id = project.gcp_project_id or settings.gcp_project_id
+        setup_gcp_auth(project=project)
+
         # sync_history 레코드 생성
         sync = SyncHistory(
-            project_id   = project_id,
-            trigger_type = trigger_type,
-            status       = "running",
+            project_id      = project_id,
+            trigger_type    = trigger_type,
+            status          = "running",
             snapshot_status = "pending",
-            started_at   = datetime.utcnow(),
+            started_at      = datetime.utcnow(),
         )
         db.add(sync)
         db.commit()
@@ -68,14 +69,14 @@ class MirrorOpsPipelineService:
                 AWSResourceModel.project_id == project_id
             ).delete()
             db.commit()
-            
+
             # ① 리소스 감지 (FR-B-003)
             assumed_session = boto3.Session(
                 region_name=project.region,
             )
             detector = ResourceDetector(
-                role_arn=account.role_arn,
-                region=project.region,
+                role_arn    = account.role_arn,
+                region      = project.region,
                 external_id = project.user_id,
             )
             aws_resources = detector.detect_all(
@@ -128,7 +129,8 @@ class MirrorOpsPipelineService:
                 hcl_code, work_dir = generator.generate(
                     project_id  = project_id,
                     mappings    = mappings,
-                    gcp_project = settings.gcp_project_id,
+                    gcp_project = gcp_project_id,
+                    gcp_region  = settings.gcp_region,
                 )
                 passed, error_msg = generator.validate(work_dir)
                 generator.cleanup(work_dir)
@@ -145,13 +147,13 @@ class MirrorOpsPipelineService:
                     environment = project.environment,
                     region      = project.region,
                     hcl_code    = hcl_code,
-                    gcp_project = settings.gcp_project_id,
+                    gcp_project = gcp_project_id,
                     db          = db,
                 )
             else:
                 # 변경 없음 → DR Package 재생성 스킵
                 print(f"[MirrorOps] 변경 없음 — DR Package 재생성 스킵 (project_id={project_id})")
-                
+
                 # [추가] 변경 없음: 최신 패키지가 ready면 dr_status 복원
                 latest_pkg = db.query(DRPackageModel).filter(
                     DRPackageModel.project_id == project_id,
