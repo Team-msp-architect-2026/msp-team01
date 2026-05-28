@@ -9,6 +9,7 @@ from app.core.database import get_db
 from app.models.project import Project
 from app.models.aws_account import AWSAccount
 from app.models.user import User
+from app.services.governance.audit_logger import log_platform_action
 
 router = APIRouter()
 
@@ -195,6 +196,16 @@ def delete_project(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail={"code": "SPAWN_FAILED", "message": f"AWS 리소스 삭제 Task 실행에 실패했습니다: {str(e)}"},
                 )
+
+    from app.services.governance.audit_logger import log_platform_action
+    log_platform_action(
+        db         = db,
+        action     = "project_delete",
+        user_id    = current_user.user_id,
+        project_id = project_id,
+        detail     = {"destroy_aws_resources": request.destroy_aws_resources},
+    )
+    db.commit()
 
     # destroy_aws_resources 여부와 관계없이 DB + S3 즉시 삭제
     _delete_project_records(project_id, project, db)

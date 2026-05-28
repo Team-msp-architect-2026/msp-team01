@@ -12,6 +12,7 @@ from app.models.user import User
 from app.models.project import Project
 from app.models.aws_account import AWSAccount
 from app.models.governance import OnboardingScan, ResourceBaseline
+from app.services.governance.audit_logger import log_platform_action
 
 router = APIRouter(prefix="/api/accounts", tags=["onboarding"])
 
@@ -142,6 +143,7 @@ def get_onboard_status(
 def confirm_onboard(
     account_id: str,
     body: dict,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -171,6 +173,23 @@ def confirm_onboard(
     scan.status       = "completed"
     scan.confirmed_at = datetime.utcnow()
     db.commit()
+
+    # Audit Log 기록 추가
+    log_platform_action(
+        db         = db,
+        action     = "onboarding_complete",
+        user_id    = current_user.user_id,
+        project_id = project_id,
+        detail     = {"baselines_created": baselines_created},
+    )
+    db.commit()
+
+    from app.api.diagram import _generate_diagram_task
+    background_tasks.add_task(
+        _generate_diagram_task,
+        project_id = project_id,
+        source     = "onboarding",
+    )
 
     return {
         "success": True,

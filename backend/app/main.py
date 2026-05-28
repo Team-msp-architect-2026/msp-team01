@@ -13,6 +13,11 @@ from app.services.governance.drift_worker import start_drift_worker
 from app.core.config import settings
 from app.api.onboarding import router as onboarding_router
 from app.api.drift import router as drift_router
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
+from app.api.audit import router as audit_router
+from app.api.resources import router as resources_router
+from app.api.diagram import router as diagram_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,6 +42,28 @@ async def lifespan(app: FastAPI):
         await drift_task
     except asyncio.CancelledError:
         print("🛑 Drift Worker 종료 완료")
+
+drift_total = Counter(
+    "autoops_drift_events_total",
+    "Total drift events detected",
+    ["project_id", "severity"],
+)
+drift_unresolved = Gauge(
+    "autoops_drift_unresolved",
+    "Unresolved drift events count",
+    ["project_id", "severity"],
+)
+terraform_duration = Histogram(
+    "autoops_terraform_apply_duration_seconds",
+    "Terraform apply duration in seconds",
+    ["environment", "status"],
+    buckets=[30, 60, 120, 300, 600, 1200],
+)
+validation_blocked = Counter(
+    "autoops_validation_blocked_total",
+    "Validation blocked deployments",
+    ["tool", "severity"],
+)
 
 app = FastAPI(
     title="AutoOps API",
@@ -86,7 +113,14 @@ app.include_router(websocket.router, tags=["websocket"])
 app.include_router(onboarding_router)
 app.include_router(drift_router)
 app.include_router(gcp_connect_router, prefix="/api/projects", tags=["gcp"])
+app.include_router(audit_router)
+app.include_router(resources_router)
+app.include_router(diagram_router)
 
 @app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok", "service": "autoops-backend"}
+
+@app.get("/api/metrics", include_in_schema=False)
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

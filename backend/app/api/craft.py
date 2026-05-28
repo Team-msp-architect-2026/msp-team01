@@ -1,6 +1,6 @@
 # backend/app/api/craft.py
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -17,6 +17,7 @@ from app.services.craftops.validator import ValidationLoop
 from app.services.craftops.runner import TerraformRunnerService, upload_hcl_to_s3, EventBridgePublisher
 from app.models.aws_account import AWSAccount
 from datetime import datetime
+from app.services.governance.audit_logger import log_platform_action
 
 router = APIRouter()
 
@@ -511,6 +512,7 @@ class DeployCompleteCallback(BaseModel):
 def deployment_complete_callback(
     deployment_id: str,
     body: DeployCompleteCallback,
+    background_tasks: BackgroundTasks,
     x_internal_secret: str = Header(None),
     db: Session = Depends(get_db),
 ):
@@ -540,6 +542,26 @@ def deployment_complete_callback(
         project.status           = "completed"
         project.last_deployed_at = datetime.utcnow()
         db.commit()
+
+        from app.services.governance.audit_logger import log_platform_action
+        log_platform_action(
+            db         = db,
+            action     = "craftops_deploy",
+            user_id    = project.user_id,
+            project_id = project.project_id,
+            detail     = {
+                "deployment_id":     deployment_id,
+                "completed_resources": body.completed_resources,
+            },
+        )
+        db.commit()
+
+        from app.api.diagram import _generate_diagram_task
+        background_tasks.add_task(
+            _generate_diagram_task,
+            project_id = body.project_id,
+            source     = "craftops_deploy",
+        )
 
         # §7-8 EventBridge 발행
         account = db.query(AWSAccount).filter(
@@ -573,6 +595,16 @@ def deployment_complete_callback(
             print(f"[경고] EventBridge 발행 실패: {e}")
 
     elif body.status == "destroyed" and project:
+
+        from app.services.governance.audit_logger import log_platform_action
+        log_platform_action(
+            db         = db,
+            action     = "craftops_destroy",
+            user_id    = project.user_id,
+            project_id = project.project_id,
+            detail     = {"deployment_id": deployment_id},
+        )
+        db.commit()
         # destroy 완료 →
         # delete_project_records로 DB 전체 삭제 (AWS 리소스 삭제 체크 후 삭제 요청한 경우)
         # projects.py의 _delete_project_records 재사용
