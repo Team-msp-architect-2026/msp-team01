@@ -22,6 +22,12 @@ class Project(Base):
     last_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # GCP 연동 — 모두 nullable=True (미연동 프로젝트 대응)
+    gcp_project_id   = Column(String(100), nullable=True)
+    gcp_secret_arn   = Column(String(500), nullable=True)
+    gcp_sa_email     = Column(String(200), nullable=True)
+    gcp_connected_at = Column(DateTime,    nullable=True)
     source = Column(String(20), nullable=False, default="craftops_deploy")  # craftops_deploy | onboarding
 
     # Relationships

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import auth, accounts, projects, craft, mirror, websocket
+from app.api.gcp_connect import router as gcp_connect_router
 from app.services.mirrorops.sqs_worker import start_sqs_worker
 from app.services.governance.drift_worker import start_drift_worker
 from app.core.config import settings
@@ -84,6 +85,7 @@ app.include_router(mirror.router, prefix="/api/mirror", tags=["mirrorops"])
 app.include_router(websocket.router, tags=["websocket"])
 app.include_router(onboarding_router)
 app.include_router(drift_router)
+app.include_router(gcp_connect_router, prefix="/api/projects", tags=["gcp"])
 
 @app.get("/health", tags=["health"])
 def health_check():

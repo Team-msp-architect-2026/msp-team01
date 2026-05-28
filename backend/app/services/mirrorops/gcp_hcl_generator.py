@@ -16,9 +16,10 @@ class GCPHCLGenerator:
 
     def generate(
         self,
-        project_id: str,
-        mappings: list[GCPMapping],
+        project_id:  str,
+        mappings:    list[GCPMapping],
         gcp_project: str,
+        gcp_region:  str = "us-west1",   # 현재 us-west1 단일 지원. 향후 사용자 선택 예정
     ) -> tuple[str, str]:
         """
         GCP Terraform HCL 전체를 생성하고 임시 디렉토리에 저장한다.
@@ -39,7 +40,7 @@ terraform{{
 }}
 provider "google"{{
   project = "{gcp_project}"
-  region  = "{settings.gcp_region}"
+  region  = "{gcp_region}"
 }}
 """
 
