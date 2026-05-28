@@ -8,3 +8,10 @@ from app.models.aws_resource import AWSResource  # noqa: F401
 from app.models.gcp_mapping import GCPMapping  # noqa: F401
 from app.models.sync_history import SyncHistory, DRPackage  # noqa: F401
 from app.models.failover_history import FailoverHistory  # noqa: F401
+from app.models.governance import (  # noqa: F401
+    OnboardingScan,
+    ResourceBaseline,
+    DriftEvent,
+    AuditLog,
+    ProjectDocument,
+)

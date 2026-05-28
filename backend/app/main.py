@@ -8,22 +8,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import auth, accounts, projects, craft, mirror, websocket
 from app.services.mirrorops.sqs_worker import start_sqs_worker
+from app.services.governance.drift_worker import start_drift_worker
 from app.core.config import settings
+from app.api.onboarding import router as onboarding_router
+from app.api.drift import router as drift_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 서버 켜질 때 SQS 워커를 백그라운드 태스크로 실행
     worker_task = asyncio.create_task(start_sqs_worker())
     print("✅ MirrorOps SQS 워커 백그라운드 실행 시작")
+
+    drift_task = asyncio.create_task(start_drift_worker())
+    print("✅ Drift Worker 백그라운드 실행 시작")
     
     yield # API 서버 동작 중...
     
     # 서버 꺼질 때 워커 종료 처리
     worker_task.cancel()
+    drift_task.cancel()
     try:
         await worker_task
     except asyncio.CancelledError:
         print("🛑 MirrorOps SQS 워커 종료 완료")
+
+    try:
+        await drift_task
+    except asyncio.CancelledError:
+        print("🛑 Drift Worker 종료 완료")
 
 app = FastAPI(
     title="AutoOps API",
@@ -70,6 +82,8 @@ app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(craft.router, prefix="/api/craft", tags=["craftops"])
 app.include_router(mirror.router, prefix="/api/mirror", tags=["mirrorops"])
 app.include_router(websocket.router, tags=["websocket"])
+app.include_router(onboarding_router)
+app.include_router(drift_router)
 
 @app.get("/health", tags=["health"])
 def health_check():

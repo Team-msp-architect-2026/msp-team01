@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 from pydantic import ConfigDict
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(
+    model_config = ConfigDict (
         env_file=".env",
         case_sensitive=False,
         extra="ignore"
@@ -34,6 +34,9 @@ class Settings(BaseSettings):
 
     # MirrorOps SQS
     mirrorops_queue_url: str = ""
+    
+    #DRIFT_SQS_QUEUE
+    drift_sqs_queue_url: str = ""
 
     # GCP
     gcp_project_id: str = ""

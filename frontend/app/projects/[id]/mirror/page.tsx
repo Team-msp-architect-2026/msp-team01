@@ -31,6 +31,7 @@ interface ProjectInfo {
   region?: string
   prefix?: string
   environment?: string
+  status?: string
 }
 
 interface FailoverRecord {
@@ -234,7 +235,7 @@ export default function MirrorDashboardPage() {
           <button
             className="mr-btn mr-btn-secondary"
             onClick={handleManualSync}
-            disabled={isSyncing}
+            disabled={isSyncing || project?.status !== 'completed'}
           >
             {isSyncing ? (
               <>
