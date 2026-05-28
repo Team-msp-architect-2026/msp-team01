@@ -71,15 +71,12 @@ class ResourceDetector:
         """
         name_prefix = f"{prefix}-{environment}-"
         detected    = []
-        # [추가] (resource_type, name) 기준 중복 방지
-        # - ResourceDeleted 필터로 걸러지지 않은 엣지 케이스 방어
         seen_names: set = set()
 
         for resource_type in RESOURCE_TYPE_MAP:
             try:
                 resources = self._query_resources(resource_type, name_prefix)
                 for res in resources:
-                    # [추가] 동일 타입+이름 중복 최종 방어
                     dedup_key = (resource_type, res.get("name", ""))
                     if dedup_key in seen_names:
                         print(f"[ResourceDetector] 중복 스킵: {resource_type} '{res.get('name', '')}'")
@@ -107,7 +104,7 @@ class ResourceDetector:
     ) -> list[dict]:
         config_client = self.session.client("config", region_name=self.region)
         results  = []
-        seen_ids: set = set()  # [추가] 동일 resource_id 페이지 중복 방지
+        seen_ids: set = set()
 
         paginator = config_client.get_paginator("list_discovered_resources")
         for page in paginator.paginate(resourceType=resource_type):
@@ -115,12 +112,10 @@ class ResourceDetector:
                 res_name = item.get("resourceName", "")
                 res_id   = item.get("resourceId", "")
 
-                # [추가] 동일 resource_id 중복 방지 (Config 페이지네이션 중복 케이스)
                 if res_id in seen_ids:
                     continue
                 seen_ids.add(res_id)
 
-                # 상세 정보 조회
                 detail = config_client.get_resource_config_history(
                     resourceType=resource_type,
                     resourceId=res_id,
@@ -130,7 +125,6 @@ class ResourceDetector:
                 config_json  = {}
 
                 if config_items:
-                    # [추가] 삭제된 리소스 필터링 (삭제 후 재생성 시 구버전 제거)
                     item_status = config_items[0].get("configurationItemStatus", "")
                     if item_status == "ResourceDeleted":
                         continue
@@ -144,7 +138,6 @@ class ResourceDetector:
                     top_tags = config_items[0].get("tags", {})
                     config_json["tags"] = top_tags
 
-                # Name 태그 추출
                 name_tag = ""
                 tags = config_json.get("tags", {})
                 if isinstance(tags, dict):
@@ -155,7 +148,6 @@ class ResourceDetector:
                             name_tag = tag.get("value", "")
                             break
 
-                # Name 태그 또는 resourceName 둘 중 하나라도 prefix 일치하면 통과
                 effective_name = name_tag or res_name
                 if not effective_name.startswith(name_prefix):
                     continue
@@ -167,3 +159,108 @@ class ResourceDetector:
                 })
 
         return results
+
+    def scan_all(self, role_arn: str, region: str = "us-west-2", external_id: str = "") -> dict:
+        import boto3
+
+        sts = boto3.client("sts")
+        kwargs = {
+            "RoleArn":         role_arn,
+            "RoleSessionName": "AutoOpsOnboardingScan",
+            "DurationSeconds": 3600,
+        }
+        if external_id:
+            kwargs["ExternalId"] = external_id
+        assumed = sts.assume_role(**kwargs)
+        creds = assumed["Credentials"]
+
+        session = boto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=region,
+        )
+
+        config_client = session.client("config")
+        ec2_client    = session.client("ec2")
+
+        resource_types = [
+            "AWS::EC2::VPC",
+            "AWS::EC2::Subnet",
+            "AWS::EC2::SecurityGroup",
+            "AWS::ECS::Cluster",
+            "AWS::RDS::DBInstance",
+            "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            "AWS::EC2::NatGateway",
+            "AWS::IAM::Role",
+            "AWS::S3::Bucket",
+            "AWS::Logs::LogGroup",
+        ]
+
+        all_resources = []
+        for resource_type in resource_types:
+            paginator = config_client.get_paginator("list_discovered_resources")
+            for page in paginator.paginate(resourceType=resource_type):
+                for r in page.get("resourceIdentifiers", []):
+                    all_resources.append({
+                        "resource_type": resource_type,
+                        "resource_id":   r["resourceId"],
+                        "resource_name": r.get("resourceName", r["resourceId"]),
+                        "region":        r.get("resourceRegion", region),
+                    })
+
+        vpc_names = {}
+        try:
+            vpcs = ec2_client.describe_vpcs()["Vpcs"]
+            for vpc in vpcs:
+                name = next(
+                    (t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"),
+                    vpc["VpcId"],
+                )
+                vpc_names[vpc["VpcId"]] = name
+        except Exception:
+            pass
+
+        subnet_vpc_map = {}
+        try:
+            subnets = ec2_client.describe_subnets()["Subnets"]
+            for s in subnets:
+                subnet_vpc_map[s["SubnetId"]] = s["VpcId"]
+        except Exception:
+            pass
+
+        sg_vpc_map = {}
+        try:
+            sgs = ec2_client.describe_security_groups()["SecurityGroups"]
+            for sg in sgs:
+                sg_vpc_map[sg["GroupId"]] = sg.get("VpcId", "")
+        except Exception:
+            pass
+
+        groups: dict = {}
+
+        def _add_to_group(resource: dict, vpc_id: str | None):
+            key = f"{resource['region']}/{vpc_id}" if vpc_id else f"{resource['region']}/no-vpc"
+            if key not in groups:
+                groups[key] = {
+                    "region":    resource["region"],
+                    "vpc_id":    vpc_id,
+                    "vpc_name":  vpc_names.get(vpc_id, vpc_id) if vpc_id else None,
+                    "resources": [],
+                }
+            groups[key]["resources"].append(resource)
+
+        for r in all_resources:
+            rtype = r["resource_type"]
+            rid   = r["resource_id"]
+
+            if rtype == "AWS::EC2::VPC":
+                _add_to_group(r, rid)
+            elif rtype == "AWS::EC2::Subnet":
+                _add_to_group(r, subnet_vpc_map.get(rid))
+            elif rtype == "AWS::EC2::SecurityGroup":
+                _add_to_group(r, sg_vpc_map.get(rid))
+            else:
+                _add_to_group(r, None)
+
+        return groups

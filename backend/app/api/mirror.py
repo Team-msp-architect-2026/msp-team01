@@ -107,7 +107,6 @@ def get_resources(
 
 
 # ── POST /api/mirror/{project_id}/sync ─────────────────────────────
-
 @router.post("/{project_id}/sync", status_code=202)
 def manual_sync(
     project_id: str,
@@ -115,11 +114,20 @@ def manual_sync(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_project_or_404(project_id, current_user.user_id, db)
-
+    project = _get_project_or_404(project_id, current_user.user_id, db)
+    
+    # 인프라 배포 완료 상태가 아니면 동기화 차단
+    if project.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_STATE",
+                "message": "인프라 배포가 완료된 프로젝트만 동기화할 수 있습니다."
+            }
+        )
+    
     from app.services.mirrorops.pipeline import MirrorOpsPipelineService
     pipeline = MirrorOpsPipelineService()
-
     background_tasks.add_task(
         pipeline.run,
         project_id    = project_id,
@@ -127,7 +135,6 @@ def manual_sync(
         trigger_type  = "manual",
         db            = db,
     )
-
     return {
         "success": True,
         "data": {

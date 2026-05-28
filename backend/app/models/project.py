@@ -22,6 +22,7 @@ class Project(Base):
     last_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    source = Column(String(20), nullable=False, default="craftops_deploy")  # craftops_deploy | onboarding
 
     # Relationships
     user = relationship("User", back_populates="projects")
