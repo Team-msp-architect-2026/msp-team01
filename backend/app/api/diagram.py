@@ -8,7 +8,6 @@ from app.core.auth import get_current_user
 from app.models.user import User
 from app.models.project import Project
 from app.models.governance import ProjectDocument, OnboardingScan
-from app.models.deployment import DeploymentResource
 
 router = APIRouter(tags=["diagram"])
 
@@ -48,10 +47,11 @@ def regenerate_diagram(
     current_user: User = Depends(get_current_user),
 ):
     project = _get_project_or_404(project_id, current_user.user_id, db)
+    source = project.source or "craftops_deploy"  # 수정
     background_tasks.add_task(
         _generate_diagram_task,
         project_id = project_id,
-        source     = project.source,
+        source     = source,  # 수정
     )
     return {"success": True, "data": {"message": "다이어그램 생성 시작됨"}}
 
@@ -65,24 +65,18 @@ def _generate_diagram_task(project_id: str, source: str):
         resources = []
 
         if source == "craftops_deploy":
-            from app.models.deployment import Deployment
-            deployment = db.query(Deployment).filter(
-                Deployment.project_id == project_id,
-                Deployment.status     == "completed",
-            ).order_by(Deployment.completed_at.desc()).first()
-
-            if deployment:
-                dep_resources = db.query(DeploymentResource).filter(
-                    DeploymentResource.deployment_id == deployment.deployment_id
-                ).all()
-                resources = [
-                    {
-                        "resource_type": r.resource_type,
-                        "resource_name": r.resource_name,
-                        "resource_id":   r.resource_arn or r.resource_id,
-                    }
-                    for r in dep_resources
-                ]
+            from app.models.aws_resource import AWSResource
+            aws_res = db.query(AWSResource).filter(
+                AWSResource.project_id == project_id,
+            ).all()
+            resources = [
+                {
+                    "resource_type": r.resource_type,
+                    "resource_name": r.resource_name,
+                    "resource_id":   r.resource_id_aws,
+                }
+                for r in aws_res
+            ]
         else:
             scan = db.query(OnboardingScan).filter(
                 OnboardingScan.project_id == project_id,

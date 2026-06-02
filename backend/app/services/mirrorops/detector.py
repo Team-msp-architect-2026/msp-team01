@@ -149,7 +149,7 @@ class ResourceDetector:
                             break
 
                 effective_name = name_tag or res_name
-                if not effective_name.startswith(name_prefix):
+                if not effective_name.lower().startswith(name_prefix.lower()):
                     continue
 
                 results.append({

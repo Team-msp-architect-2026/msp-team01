@@ -104,6 +104,7 @@ def create_project(
         region=request.region,
         status="created",
         dr_status="not_ready",
+        source="craftops_deploy",
     )
     db.add(project)
     db.commit()

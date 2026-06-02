@@ -594,6 +594,17 @@ def deployment_complete_callback(
         except Exception as e:
             print(f"[경고] EventBridge 발행 실패: {e}")
 
+        if account:
+            background_tasks.add_task(
+                _run_detect_all,
+                project_id  = project.project_id,
+                role_arn    = account.role_arn,
+                external_id = project.user_id,
+                prefix      = project.prefix,
+                environment = project.environment,
+                region      = project.region,
+            )
+
     elif body.status == "destroyed" and project:
 
         from app.services.governance.audit_logger import log_platform_action
@@ -881,3 +892,32 @@ def _deployment_to_dict(deployment: Deployment) -> dict:
         "started_at":          deployment.started_at.isoformat(),
         "completed_at":        deployment.completed_at.isoformat() if deployment.completed_at else None,
     }
+
+def _run_detect_all(project_id: str, role_arn: str, external_id: str, prefix: str, environment: str, region: str):
+    from app.core.database import SessionLocal
+    from app.services.mirrorops.detector import ResourceDetector
+    from app.models.aws_resource import AWSResource
+    from app.models.project import Project
+    db = SessionLocal()
+    try:
+        # GCP 연동 프로젝트는 pipeline.run()에서 처리하므로 스킵
+        project = db.query(Project).filter(
+            Project.project_id == project_id
+        ).first()
+        if project and project.gcp_project_id:
+            print(f"[CraftOps] GCP 연동 프로젝트 — detect_all 스킵 (pipeline에서 처리)")
+            return
+
+        # 기존 리소스 삭제 후 재저장 (중복 방지)
+        db.query(AWSResource).filter(
+            AWSResource.project_id == project_id
+        ).delete(synchronize_session=False)
+        db.commit()
+
+        detector = ResourceDetector(role_arn=role_arn, region=region, external_id=external_id)
+        detector.detect_all(project_id=project_id, prefix=prefix, environment=environment, db=db)
+        print(f"[CraftOps] 리소스 감지 완료: project_id={project_id}")
+    except Exception as e:
+        print(f"[CraftOps] 리소스 감지 실패: {e}")
+    finally:
+        db.close()

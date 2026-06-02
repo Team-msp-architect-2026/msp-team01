@@ -199,7 +199,7 @@ AWS 설정:
         })
 
         response = self.client.invoke_model(
-            modelId     = "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            modelId     = "anthropic.claude-sonnet-4-20250514-v1:0",
             body        = body,
             contentType = "application/json",
             accept      = "application/json",
@@ -209,7 +209,11 @@ AWS 설정:
         raw_text = result["content"][0]["text"]
 
         mermaid_match = re.search(r"```mermaid\n(.*?)```", raw_text, re.DOTALL)
-        mermaid_code  = mermaid_match.group(1).strip() if mermaid_match else ""
+        if mermaid_match:
+            mermaid_code = mermaid_match.group(1).strip()
+        else:
+            print(f"[Diagram] mermaid 코드블록 파싱 실패 — raw_text 앞 200자: {raw_text[:200]}")
+            mermaid_code = ""
         description   = re.sub(r"```mermaid\n.*?```", "", raw_text, flags=re.DOTALL).strip()
 
         return {

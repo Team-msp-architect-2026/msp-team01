@@ -622,7 +622,7 @@ export default function DashboardPage() {
                       key={p.project_id}
                       onClick={() => {
                         if (isConfirmingDelete) return
-                        router.push(`/projects/${p.project_id}/${p.project_id}`)
+                        router.push(`/projects/${p.project_id}`)
                       }}
                     >
                       <td>
@@ -677,7 +677,7 @@ export default function DashboardPage() {
                                 className="dx-ibtn"
                                 data-variant="blue"
                                 title="MirrorOps DR 대시보드"
-                                onClick={() => router.push(`/projects/${p.project_id}/${p.project_id}`)}
+                                onClick={() => router.push(`/projects/${p.project_id}`)}
                               >
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                                   <rect x="3" y="3" width="18" height="18" rx="2"/>

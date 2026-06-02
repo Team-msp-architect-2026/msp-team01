@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { apiClient } from '@/lib/api'
 import dynamic from 'next/dynamic'
+import InfraMetrics from '@/components/InfraMetrics'
 
 const ArchitectureDiagram = dynamic<{ mermaidCode: string }>(
   () => import('@/components/ArchitectureDiagram'),
@@ -68,8 +69,6 @@ const ACTION_LABEL: Record<string, string> = {
   validation_blocked_tfsec:   'tfsec 차단',
   validation_blocked_checkov: 'checkov 차단',
 }
-
-const GRAFANA_URL = process.env.NEXT_PUBLIC_GRAFANA_URL || ''
 
 // ─── 메인 컴포넌트 ────────────────────────────────────────────────
 export default function GovernancePage() {
@@ -236,7 +235,7 @@ export default function GovernancePage() {
           </div>
         </div>
 
-        {/* ── KPI strip (Datadog style) ── */}
+        {/* ── KPI strip ── */}
         <div className="gv-kpi-strip">
           <div className="gv-kpi">
             <div className="gv-kpi-head">
@@ -307,61 +306,30 @@ export default function GovernancePage() {
           </div>
         </div>
 
-        {/* ── Grafana panel ── */}
+        {/* ── 인프라 모니터링 (CloudWatch) ── */}
         <div className="gv-panel">
           <div className="gv-panel-head">
             <div className="gv-panel-title">
               <span className="gv-panel-ico" data-tone="blue">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M3 3v18h18"/>
-                  <path d="m19 9-5 5-4-4-3 3"/>
+                  <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>
                 </svg>
               </span>
               <span>인프라 모니터링</span>
-              {GRAFANA_URL && (
+              {project.status === 'completed' && (
                 <span className="gv-status-pill" data-tone="green">
                   <span className="gv-pip gv-pip-green" />
-                  Grafana 연결됨
+                  CloudWatch Live
                 </span>
               )}
             </div>
-            {GRAFANA_URL && (
-              <button
-                className="gv-btn gv-btn-sm"
-                onClick={() => window.open(`${GRAFANA_URL}/d/autoops-infra?orgId=1`, '_blank')}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/>
-                  <polyline points="15 3 21 3 21 9"/>
-                  <line x1="10" y1="14" x2="21" y2="3"/>
-                </svg>
-                전체 화면
-              </button>
-            )}
           </div>
-          {GRAFANA_URL ? (
-            <iframe
-              src={`${GRAFANA_URL}/d/autoops-infra/infra-health?orgId=1&theme=dark&kiosk`}
-              width="100%"
-              height="320"
-              style={{ border: 'none', display: 'block' }}
-              title="Grafana 인프라 헬스"
-            />
-          ) : (
-            <div className="gv-placeholder">
-              <div className="gv-placeholder-mark">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M3 3v18h18"/>
-                  <path d="m19 9-5 5-4-4-3 3"/>
-                </svg>
-              </div>
-              <div className="gv-placeholder-title">Grafana Deployment Pending</div>
-              <div className="gv-placeholder-sub">섹션 11 완료 후 메트릭 패널이 표시됩니다</div>
-            </div>
-          )}
+          <div style={{ padding: '20px' }}>
+            <InfraMetrics projectId={projectId} />
+          </div>
         </div>
 
-        {/* ── Drift + Audit (Datadog-style 2-col) ── */}
+        {/* ── Drift + Audit (2-col) ── */}
         <div className="gv-two-col">
 
           {/* Drift */}
@@ -847,7 +815,7 @@ body::before {
 }
 .gv-link-btn:hover { color: #88bcff; }
 
-/* KPI strip (Datadog-style: dense, no big numbers cluster) */
+/* KPI strip */
 .gv-kpi-strip {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -874,6 +842,7 @@ body::before {
 .gv-kpi[data-tone="blue"]   { --gv-acc: #5aa3ff; }
 .gv-kpi[data-tone="orange"] { --gv-acc: #ffa53d; }
 .gv-kpi[data-tone="yellow"] { --gv-acc: #f5d061; }
+.gv-kpi[data-tone="mute"]   { --gv-acc: rgba(255,255,255,0.15); }
 
 .gv-kpi-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -983,7 +952,7 @@ body::before {
   letter-spacing: 0.04em;
 }
 
-/* Placeholder (empty Grafana / diagram) */
+/* Placeholder */
 .gv-placeholder {
   padding: 56px 24px;
   display: flex; flex-direction: column;
