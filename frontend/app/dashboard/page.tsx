@@ -69,6 +69,7 @@ export default function DashboardPage() {
   const [destroyAws, setDestroyAws] = useState(false)
   const [toast, setToast]           = useState<ToastData | null>(null)
   const [filter, setFilter]         = useState<FilterKey>('all')
+  const [driftCounts, setDriftCounts] = useState<Record<string, number>>({})
 
   // localStorage toast (deploy success carry-over)
   useEffect(() => {
@@ -90,6 +91,25 @@ export default function DashboardPage() {
   }, [])
 
   useEffect(() => { fetchProjects() }, [fetchProjects])
+
+  useEffect(() => {
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || ''
+  const wsUrl   = API_URL.replace('https://', 'wss://').replace('http://', 'ws://')
+  const token   = typeof window !== 'undefined' ? localStorage.getItem('access_token') : ''
+  if (!token) return
+
+  const ws = new WebSocket(`${wsUrl}/ws/events/dashboard?token=${token}`)
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data)
+    if (msg.type === 'drift_detected') {
+      setDriftCounts(prev => ({
+        ...prev,
+        [msg.data.project_id]: (prev[msg.data.project_id] || 0) + 1
+      }))
+    }
+  }
+  return () => ws.close()
+}, [])
 
   const handleDelete = async (projectId: string) => {
     try {
@@ -602,7 +622,7 @@ export default function DashboardPage() {
                       key={p.project_id}
                       onClick={() => {
                         if (isConfirmingDelete) return
-                        router.push(`/projects/${p.project_id}/mirror`)
+                        router.push(`/projects/${p.project_id}`)
                       }}
                     >
                       <td>
@@ -623,6 +643,20 @@ export default function DashboardPage() {
                           <span className="pip"></span>
                           {deployConf.text}
                         </span>
+                        {driftCounts[p.project_id] > 0 && (
+                          <span style={{
+                            fontFamily: 'var(--dx-mono)',
+                            fontSize: '10px',
+                            padding: '2px 7px',
+                            borderRadius: '100px',
+                            background: 'rgba(255,118,118,0.1)',
+                            color: 'var(--dx-red)',
+                            border: '1px solid rgba(255,118,118,0.25)',
+                            marginLeft: '6px',
+                          }}>
+                            Drift {driftCounts[p.project_id]}
+                          </span>
+                        )}
                       </td>
                       <td>
                         <span className="dx-status" data-tone={drConf.tone}>
@@ -643,7 +677,7 @@ export default function DashboardPage() {
                                 className="dx-ibtn"
                                 data-variant="blue"
                                 title="MirrorOps DR 대시보드"
-                                onClick={() => router.push(`/projects/${p.project_id}/mirror`)}
+                                onClick={() => router.push(`/projects/${p.project_id}`)}
                               >
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                                   <rect x="3" y="3" width="18" height="18" rx="2"/>

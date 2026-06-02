@@ -13,19 +13,21 @@ from app.services.governance.drift_worker import start_drift_worker
 from app.core.config import settings
 from app.api.onboarding import router as onboarding_router
 from app.api.drift import router as drift_router
+from app.api.audit import router as audit_router
+from app.api.resources import router as resources_router
+from app.api.diagram import router as diagram_router
+from app.api import metrics as metrics_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 서버 켜질 때 SQS 워커를 백그라운드 태스크로 실행
     worker_task = asyncio.create_task(start_sqs_worker())
     print("✅ MirrorOps SQS 워커 백그라운드 실행 시작")
 
     drift_task = asyncio.create_task(start_drift_worker())
     print("✅ Drift Worker 백그라운드 실행 시작")
-    
-    yield # API 서버 동작 중...
-    
-    # 서버 꺼질 때 워커 종료 처리
+
+    yield
+
     worker_task.cancel()
     drift_task.cancel()
     try:
@@ -37,6 +39,7 @@ async def lifespan(app: FastAPI):
         await drift_task
     except asyncio.CancelledError:
         print("🛑 Drift Worker 종료 완료")
+
 
 app = FastAPI(
     title="AutoOps API",
@@ -77,15 +80,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-app.include_router(accounts.router, prefix="/api/accounts", tags=["accounts"])
-app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
-app.include_router(craft.router, prefix="/api/craft", tags=["craftops"])
-app.include_router(mirror.router, prefix="/api/mirror", tags=["mirrorops"])
-app.include_router(websocket.router, tags=["websocket"])
+app.include_router(auth.router,           prefix="/api/auth",     tags=["auth"])
+app.include_router(accounts.router,       prefix="/api/accounts", tags=["accounts"])
+app.include_router(projects.router,       prefix="/api/projects", tags=["projects"])
+app.include_router(craft.router,          prefix="/api/craft",    tags=["craftops"])
+app.include_router(mirror.router,         prefix="/api/mirror",   tags=["mirrorops"])
+app.include_router(websocket.router,      tags=["websocket"])
 app.include_router(onboarding_router)
 app.include_router(drift_router)
-app.include_router(gcp_connect_router, prefix="/api/projects", tags=["gcp"])
+app.include_router(gcp_connect_router,    prefix="/api/projects", tags=["gcp"])
+app.include_router(audit_router)
+app.include_router(resources_router)
+app.include_router(diagram_router)
+app.include_router(metrics_router.router, prefix="/api",          tags=["metrics"])
 
 @app.get("/health", tags=["health"])
 def health_check():

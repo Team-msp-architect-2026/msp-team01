@@ -1,6 +1,6 @@
 # backend/app/api/craft.py
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -17,6 +17,7 @@ from app.services.craftops.validator import ValidationLoop
 from app.services.craftops.runner import TerraformRunnerService, upload_hcl_to_s3, EventBridgePublisher
 from app.models.aws_account import AWSAccount
 from datetime import datetime
+from app.services.governance.audit_logger import log_platform_action
 
 router = APIRouter()
 
@@ -511,6 +512,7 @@ class DeployCompleteCallback(BaseModel):
 def deployment_complete_callback(
     deployment_id: str,
     body: DeployCompleteCallback,
+    background_tasks: BackgroundTasks,
     x_internal_secret: str = Header(None),
     db: Session = Depends(get_db),
 ):
@@ -540,6 +542,26 @@ def deployment_complete_callback(
         project.status           = "completed"
         project.last_deployed_at = datetime.utcnow()
         db.commit()
+
+        from app.services.governance.audit_logger import log_platform_action
+        log_platform_action(
+            db         = db,
+            action     = "craftops_deploy",
+            user_id    = project.user_id,
+            project_id = project.project_id,
+            detail     = {
+                "deployment_id":     deployment_id,
+                "completed_resources": body.completed_resources,
+            },
+        )
+        db.commit()
+
+        from app.api.diagram import _generate_diagram_task
+        background_tasks.add_task(
+            _generate_diagram_task,
+            project_id = body.project_id,
+            source     = "craftops_deploy",
+        )
 
         # §7-8 EventBridge 발행
         account = db.query(AWSAccount).filter(
@@ -572,7 +594,28 @@ def deployment_complete_callback(
         except Exception as e:
             print(f"[경고] EventBridge 발행 실패: {e}")
 
+        if account:
+            background_tasks.add_task(
+                _run_detect_all,
+                project_id  = project.project_id,
+                role_arn    = account.role_arn,
+                external_id = project.user_id,
+                prefix      = project.prefix,
+                environment = project.environment,
+                region      = project.region,
+            )
+
     elif body.status == "destroyed" and project:
+
+        from app.services.governance.audit_logger import log_platform_action
+        log_platform_action(
+            db         = db,
+            action     = "craftops_destroy",
+            user_id    = project.user_id,
+            project_id = project.project_id,
+            detail     = {"deployment_id": deployment_id},
+        )
+        db.commit()
         # destroy 완료 →
         # delete_project_records로 DB 전체 삭제 (AWS 리소스 삭제 체크 후 삭제 요청한 경우)
         # projects.py의 _delete_project_records 재사용
@@ -849,3 +892,32 @@ def _deployment_to_dict(deployment: Deployment) -> dict:
         "started_at":          deployment.started_at.isoformat(),
         "completed_at":        deployment.completed_at.isoformat() if deployment.completed_at else None,
     }
+
+def _run_detect_all(project_id: str, role_arn: str, external_id: str, prefix: str, environment: str, region: str):
+    from app.core.database import SessionLocal
+    from app.services.mirrorops.detector import ResourceDetector
+    from app.models.aws_resource import AWSResource
+    from app.models.project import Project
+    db = SessionLocal()
+    try:
+        # GCP 연동 프로젝트는 pipeline.run()에서 처리하므로 스킵
+        project = db.query(Project).filter(
+            Project.project_id == project_id
+        ).first()
+        if project and project.gcp_project_id:
+            print(f"[CraftOps] GCP 연동 프로젝트 — detect_all 스킵 (pipeline에서 처리)")
+            return
+
+        # 기존 리소스 삭제 후 재저장 (중복 방지)
+        db.query(AWSResource).filter(
+            AWSResource.project_id == project_id
+        ).delete(synchronize_session=False)
+        db.commit()
+
+        detector = ResourceDetector(role_arn=role_arn, region=region, external_id=external_id)
+        detector.detect_all(project_id=project_id, prefix=prefix, environment=environment, db=db)
+        print(f"[CraftOps] 리소스 감지 완료: project_id={project_id}")
+    except Exception as e:
+        print(f"[CraftOps] 리소스 감지 실패: {e}")
+    finally:
+        db.close()

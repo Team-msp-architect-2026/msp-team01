@@ -19,6 +19,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from app.services.governance.audit_logger import log_platform_action
 
 router = APIRouter()
 
@@ -626,6 +627,25 @@ async def _run_failover_actual(
         rto_seconds = int((datetime.utcnow() - started_at).total_seconds())
         _log(f"실제 RTO: {rto_seconds // 60}분 {rto_seconds % 60}초")
         _update_status("completed", rto_seconds=rto_seconds, resources_created=resources_created)
+
+        from app.services.governance.audit_logger import log_platform_action
+        from app.core.database import SessionLocal
+        _audit_db = SessionLocal()
+        try:
+            log_platform_action(
+                db         = _audit_db,
+                action     = "failover_execute",
+                user_id    = project.user_id,
+                project_id = project_id,
+                detail     = {
+                    "failover_id": failover_id,
+                    "rto_seconds": rto_seconds,
+                    "mode":        "actual",
+                },
+            )
+            _audit_db.commit()
+        finally:
+            _audit_db.close()
 
     except Exception as e:
         err_msg = str(e)

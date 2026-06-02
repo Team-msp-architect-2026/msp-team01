@@ -5,7 +5,6 @@ from app.core.config import settings
 
 
 # 리소스 타입별 Bedrock 프롬프트
-# "어떤 값으로 매핑하면 되는지"의 의미 정보만 요청
 RESOURCE_PROMPTS: dict[str, str] = {
     "google_compute_firewall": """
 AWS SecurityGroup 설정을 분석하여 GCP Firewall 변환에 필요한 정보를 추출하세요.
@@ -157,3 +156,67 @@ AWS 설정:
                 "mapping_info":  {},
                 "review_reason": f"Bedrock 응답 파싱 실패: {raw[:200]}",
             }
+
+    def generate_architecture_diagram(self, resources: list[dict]) -> dict:
+        """
+        리소스 목록을 기반으로 Mermaid 다이어그램 + 한국어 설명 생성.
+        CraftOps 배포 프로젝트: deployment_resources 전달
+        온보딩 프로젝트: scan_result resources 전달
+
+        반환:
+        {
+            "mermaid_code": "graph TD\\n  ...",
+            "description":  "## 인프라 구조 설명\\n..."
+        }
+        """
+        resource_summary = []
+        for r in resources[:20]:
+            resource_summary.append({
+                "type": r.get("resource_type", r.get("resourceType", "")),
+                "name": r.get("resource_name", r.get("resourceName", r.get("resource_id", ""))),
+                "id":   r.get("resource_id", r.get("resource_id_aws", "")),
+            })
+
+        prompt = f"""당신은 AWS 인프라 아키텍처 설계 전문가입니다.
+아래 AWS 리소스 목록을 분석하여 다음 두 가지를 마크다운 형식으로 작성해주세요.
+
+리소스 목록:
+{json.dumps(resource_summary, ensure_ascii=False, indent=2)}
+
+1. 이 인프라의 구조를 표현하는 Mermaid 다이어그램 코드 (graph TD 스타일)
+   - 리소스 간 연결 관계를 화살표로 표현
+   - 인터넷 트래픽 흐름 포함 (Internet → ALB → ECS → RDS 등)
+   - 반드시 ```mermaid 코드블록으로 감싸기
+
+2. 리소스별 역할 및 전체적인 데이터 흐름/동작 방식 한국어 설명
+
+마크다운 형식으로 응답하세요."""
+
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens":         2000,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+
+        response = self.client.invoke_model(
+            modelId     = "anthropic.claude-sonnet-4-20250514-v1:0",
+            body        = body,
+            contentType = "application/json",
+            accept      = "application/json",
+        )
+
+        result   = json.loads(response["body"].read())
+        raw_text = result["content"][0]["text"]
+
+        mermaid_match = re.search(r"```mermaid\n(.*?)```", raw_text, re.DOTALL)
+        if mermaid_match:
+            mermaid_code = mermaid_match.group(1).strip()
+        else:
+            print(f"[Diagram] mermaid 코드블록 파싱 실패 — raw_text 앞 200자: {raw_text[:200]}")
+            mermaid_code = ""
+        description   = re.sub(r"```mermaid\n.*?```", "", raw_text, flags=re.DOTALL).strip()
+
+        return {
+            "mermaid_code": mermaid_code,
+            "description":  description,
+        }

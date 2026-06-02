@@ -53,14 +53,25 @@ export default function ValidatePage() {
       })
       setResult(res.data.data)
     } catch (err: unknown) {
-      const errData = (
-        err as { response?: { data?: { error?: { code?: string; message?: string; details?: ErrorDetails } } } }
-      )?.response?.data?.error
-      setError({
-        code:    errData?.code    || 'UNKNOWN',
-        message: errData?.message || 'Validation에 실패했습니다.',
-        details: errData?.details,
-      })
+      const axiosErr = err as {
+        response?: { status?: number; data?: { error?: { code?: string; message?: string; details?: ErrorDetails } } }
+        code?: string
+      }
+
+      if (axiosErr?.response?.status === 504 || axiosErr?.code === 'ECONNABORTED') {
+        setError({
+          code:    'TIMEOUT',
+          message: '요청 시간이 초과됐습니다. 다시 시도해 주세요.\n(tfsec · checkov · infracost 분석에 시간이 걸릴 수 있습니다)',
+          details: undefined,
+        })
+      } else {
+        const errData = axiosErr?.response?.data?.error
+        setError({
+          code:    errData?.code    || 'UNKNOWN',
+          message: errData?.message || 'Validation에 실패했습니다.',
+          details: errData?.details,
+        })
+      }
     } finally {
       setIsValidating(false)
     }
@@ -270,12 +281,18 @@ export default function ValidatePage() {
             <div className="vp-alert-head">
               <span className="vp-alert-ico">!</span>
               <div>
-                <div className="vp-alert-title">검증 실패</div>
-                <div className="vp-alert-msg">{error.message}</div>
+                <div className="vp-alert-title">
+                  {error.code === 'TIMEOUT' ? '⏱ 응답 시간 초과' : '검증 실패'}
+                </div>
+                <div className="vp-alert-msg" style={{ whiteSpace: 'pre-line' }}>
+                  {error.message}
+                </div>
               </div>
             </div>
             <div className="vp-alert-actions">
-              <button className="vp-btn-secondary" onClick={handleValidate}>다시 시도</button>
+              <button className="vp-btn-secondary" onClick={() => { setError(null); handleValidate() }}>
+                다시 시도
+              </button>
             </div>
           </div>
         )}
