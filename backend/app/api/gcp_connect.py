@@ -175,20 +175,6 @@ def _validate_gcp_credentials(key_dict: dict, gcp_project_id: str) -> str:
                 },
             )
 
-        # 프로젝트 접근 권한 확인
-        check = subprocess.run(
-            ["gcloud", "projects", "describe", gcp_project_id],
-            capture_output=True, text=True, timeout=30,
-        )
-        if check.returncode != 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code":    "GCP_AUTH_ERROR",
-                    "message": "GCP 프로젝트 접근 권한 없음. 서비스 계정 권한을 확인하세요.",
-                },
-            )
-
         return key_dict.get("client_email", "")
 
     finally:

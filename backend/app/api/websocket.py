@@ -287,55 +287,12 @@ async def _stream_failover_logs(
     project_id: str,
     failover_id: str,
 ) -> None:
-    log_group  = f"/autoops/failover/{failover_id}"
-    next_token = None
+    log_group  = "/autoops/failover-runner"
+    start_time = None  # fh.started_at 기준으로 설정
 
     try:
         while True:
-            # ── CloudWatch 로그 즉시 폴링 (초기 대기 없음) ────────────
-            try:
-                streams = cw.describe_log_streams(
-                    logGroupName = log_group,
-                    orderBy      = "LastEventTime",
-                    descending   = True,
-                    limit        = 1,
-                )
-                log_streams = streams.get("logStreams", [])
-
-                if log_streams:
-                    kwargs = {
-                        "logGroupName":  log_group,
-                        "logStreamName": log_streams[0]["logStreamName"],
-                        "startFromHead": True,
-                        "limit":         100,
-                    }
-                    if next_token:
-                        kwargs["nextToken"] = next_token
-
-                    resp       = cw.get_log_events(**kwargs)
-                    events     = resp.get("events", [])
-                    next_token = resp.get("nextForwardToken")
-
-                    for event in events:
-                        msg = event.get("message", "").strip()
-                        if not msg:
-                            continue
-                        await websocket.send_json({
-                            "event_type": "failover_progress",
-                            "project_id": project_id,
-                            "timestamp":  datetime.now(timezone.utc).isoformat(),
-                            "data": {
-                                "failover_id":      failover_id,
-                                "current_resource": msg,
-                                "elapsed_seconds":  0,
-                            },
-                        })
-
-            except Exception:
-                # 로그 그룹 미생성, 일시 오류 등 — 무시하고 계속 폴링
-                pass
-
-            # ── DB 완료 여부 체크 ──────────────────────────────────
+            # DB에서 상태 + 시작 시각 조회
             db: Session = SessionLocal()
             try:
                 from app.models.failover_history import FailoverHistory
@@ -346,8 +303,38 @@ async def _stream_failover_logs(
                 rto_seconds    = fh.actual_rto_seconds    if fh else None
                 gcp_created    = fh.gcp_resources_created if fh else None
                 error_msg      = fh.error_message         if fh else None
+                if start_time is None and fh and fh.started_at:
+                    import calendar
+                    start_time = int(calendar.timegm(fh.started_at.timetuple())) * 1000
             finally:
                 db.close()
+
+            # 로그 폴링
+            if start_time:
+                try:
+                    resp = cw.filter_log_events(
+                        logGroupName  = log_group,
+                        filterPattern = '"[Failover Runner]"',
+                        startTime     = start_time,
+                        limit         = 100,
+                    )
+                    events = resp.get("events", [])
+                    for event in events:
+                        msg = event.get("message", "").strip()
+                        if msg:
+                            start_time = event["timestamp"] + 1  # 중복 방지
+                            await websocket.send_json({
+                                "event_type": "failover_progress",
+                                "project_id": project_id,
+                                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                                "data": {
+                                    "failover_id":      failover_id,
+                                    "current_resource": msg,
+                                    "elapsed_seconds":  0,
+                                },
+                            })
+                except Exception:
+                    pass
 
             if current_status == "completed":
                 await websocket.send_json({

@@ -58,6 +58,10 @@ export default function MirrorDashboardPage() {
   const [syncError, setSyncError]         = useState<string | null>(null)
   const [isSyncing, setIsSyncing]         = useState(false)
 
+  // ── GCP 연동 상태 ────────────────────────────────────────────────
+  const [isConnected, setIsConnected]       = useState<boolean | null>(null)
+  const [showNotConnected, setShowNotConnected] = useState(false)
+
   // ── GCP 리소스 관리 상태 ─────────────────────────────────────────
   const [latestFailover, setLatestFailover]   = useState<FailoverRecord | null>(null)
   const [destroyStatus, setDestroyStatus] = useState<'idle' | 'confirming' | 'destroying' | 'destroyed' | 'failed'>('idle')
@@ -68,6 +72,14 @@ export default function MirrorDashboardPage() {
       .get(`/api/projects/${projectId}`)
       .then((res) => setProject(res.data.data))
       .catch(() => {})
+  }, [projectId])
+
+  // GCP 연동 상태 조회 — 페이지 진입 시 is_connected 확인
+  useEffect(() => {
+    apiClient
+      .get(`/api/projects/${projectId}/gcp/status`)
+      .then((res) => setIsConnected(Boolean(res.data?.data?.is_connected)))
+      .catch(() => setIsConnected(false))
   }, [projectId])
 
   // 페일오버 이력 조회 — 페이지 진입 시 GCP 리소스 상태 복원
@@ -158,6 +170,15 @@ export default function MirrorDashboardPage() {
       await apiClient.post(`/api/mirror/${projectId}/sync`)
       refetch()
     } catch (err: unknown) {
+      // GCP_NOT_CONNECTED (400) → 연동 안내 배너 표시 (추가)
+      const code =
+        (err as { response?: { data?: { error?: { code?: string } } } })
+          ?.response?.data?.error?.code
+      const httpStatus = (err as { response?: { status?: number } })?.response?.status
+      if (code === 'GCP_NOT_CONNECTED' || httpStatus === 400) {
+        setIsConnected(false)
+        setShowNotConnected(true)
+      }
       const msg =
         (err as { response?: { data?: { error?: { message?: string } } } })
           ?.response?.data?.error?.message ?? '동기화 요청에 실패했습니다.'
@@ -213,6 +234,8 @@ export default function MirrorDashboardPage() {
   const showGcpManagement = latestFailover &&
     ['completed', 'failed', 'destroying', 'destroyed', 'destroy_failed'].includes(latestFailover.status)
 
+  const goToConnect = () => router.push(`/projects/${projectId}/gcp-connect`)
+
   return (
     <>
       <style>{styles}</style>
@@ -232,26 +255,62 @@ export default function MirrorDashboardPage() {
               {awsRegion} 리전 기준 실시간 인프라 동기화 현황입니다.
             </p>
           </div>
-          <button
-            className="mr-btn mr-btn-secondary"
-            onClick={handleManualSync}
-            disabled={isSyncing || project?.status !== 'completed'}
-          >
-            {isSyncing ? (
-              <>
-                <span className="mr-spinner-sm" />
-                <span>동기화 중...</span>
-              </>
-            ) : (
-              <>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>
-                </svg>
-                <span>수동 동기화</span>
-              </>
+
+          {/* Sync 버튼 — GCP 연동 상태에 따라 활성/비활성 */}
+          <div className="mr-sync-wrap">
+            <button
+              className="mr-btn mr-btn-secondary"
+              onClick={handleManualSync}
+              disabled={isSyncing || project?.status !== 'completed' || isConnected === false || drStatus?.dr_status === 'syncing'}
+            >
+              {isSyncing ? (
+                <>
+                  <span className="mr-spinner-sm" />
+                  <span>동기화 중...</span>
+                </>
+              ) : (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>
+                  </svg>
+                  <span>{isConnected === null ? '로딩 중...' : isConnected ? 'DR 패키지 생성' : 'GCP 연동 필요'}</span>
+                </>
+              )}
+            </button>
+
+            {isConnected === false && (
+              <div className="mr-sync-hint">
+                <span className="mr-sync-hint-text">GCP 연동 후 DR 패키지를 생성할 수 있습니다.</span>
+                <button className="mr-sync-link" onClick={goToConnect}>
+                  GCP 연동하기 <span className="mr-arrow">→</span>
+                </button>
+              </div>
             )}
-          </button>
+          </div>
         </div>
+
+        {/* GCP_NOT_CONNECTED 인라인 에러 배너 */}
+        {showNotConnected && (
+          <div className="mr-gcp-banner">
+            <span className="mr-gcp-banner-ico">⚠️</span>
+            <div className="mr-gcp-banner-body">
+              <div className="mr-gcp-banner-title">GCP 계정 연동이 필요합니다.</div>
+              <div className="mr-gcp-banner-desc">
+                MirrorOps Sync와 Failover를 사용하려면 GCP 계정을 먼저 연동해야 합니다.
+              </div>
+              <button className="mr-gcp-banner-cta" onClick={goToConnect}>
+                GCP 연동하기 <span className="mr-arrow">→</span>
+              </button>
+            </div>
+            <button
+              className="mr-gcp-banner-close"
+              onClick={() => setShowNotConnected(false)}
+              aria-label="닫기"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* Sync error */}
         {syncError && (
@@ -804,6 +863,28 @@ body::before {
 }
 .mr-sub { font-size: 14.5px; color: #aeb4c5; margin: 0; line-height: 1.55; }
 
+/* Sync 버튼 + 안내 (추가) */
+.mr-sync-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.mr-sync-hint {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  text-align: right; max-width: 240px;
+}
+.mr-sync-hint-text {
+  font-size: 12px; color: #7a8298; line-height: 1.5;
+}
+.mr-sync-link {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: none; cursor: pointer;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 12.5px; font-weight: 600;
+  color: #5aa3ff;
+  padding: 0;
+  transition: color 160ms;
+}
+.mr-sync-link:hover { color: #8cc0ff; }
+.mr-sync-link:hover .mr-arrow { transform: translateX(3px); }
+.mr-sync-link .mr-arrow { transition: transform 200ms; }
+
 .mr-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 9px;
   padding: 11px 18px;
@@ -858,6 +939,56 @@ body::before {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-weight: 700; font-size: 11px;
 }
+
+/* GCP_NOT_CONNECTED 배너 (추가) */
+.mr-gcp-banner {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 16px 18px; border-radius: 12px;
+  border: 1px solid rgba(250,204,21,0.3);
+  background: rgba(250,204,21,0.1);
+  margin-bottom: 20px;
+  position: relative;
+}
+.mr-gcp-banner-ico {
+  flex-shrink: 0; font-size: 18px; line-height: 1.4;
+}
+.mr-gcp-banner-body { flex: 1; min-width: 0; }
+.mr-gcp-banner-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 700; font-size: 14.5px;
+  color: #facc15; letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+.mr-gcp-banner-desc {
+  font-size: 13px; color: #d6c98a; line-height: 1.55;
+  margin-bottom: 12px;
+}
+.mr-gcp-banner-cta {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 16px; border-radius: 9px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px; font-weight: 600;
+  border: 1px solid rgba(250,204,21,0.45);
+  background: rgba(250,204,21,0.14);
+  color: #facc15;
+  cursor: pointer;
+  transition: background 160ms, border-color 160ms;
+}
+.mr-gcp-banner-cta:hover { background: rgba(250,204,21,0.22); border-color: rgba(250,204,21,0.65); }
+.mr-gcp-banner-cta:hover .mr-arrow { transform: translateX(3px); }
+.mr-gcp-banner-cta .mr-arrow { transition: transform 200ms; }
+.mr-gcp-banner-close {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  border-radius: 7px;
+  border: 1px solid rgba(250,204,21,0.22);
+  background: transparent;
+  color: rgba(250,204,21,0.7);
+  cursor: pointer; font-size: 12px;
+  display: grid; place-items: center;
+  transition: color 160ms, background 160ms, border-color 160ms;
+}
+.mr-gcp-banner-close:hover { color: #facc15; background: rgba(250,204,21,0.12); border-color: rgba(250,204,21,0.4); }
 
 .mr-split {
   display: grid; grid-template-columns: 1fr 1fr;
@@ -1081,5 +1212,7 @@ body::before {
   .mr-kpi-cell { align-items: flex-start; }
   .mr-action-row { flex-direction: column; }
   .mr-gcp-info { grid-template-columns: repeat(2, 1fr); }
+  .mr-sync-wrap { align-items: flex-start; }
+  .mr-sync-hint { align-items: flex-start; text-align: left; }
 }
 `
