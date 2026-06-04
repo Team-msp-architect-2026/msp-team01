@@ -10,6 +10,8 @@ from app.models.deployment import Deployment
 
 router = APIRouter()
 
+active_connections: dict[str, list] = {}
+
 cw = boto3.client("logs", region_name="us-west-2")
 
 
