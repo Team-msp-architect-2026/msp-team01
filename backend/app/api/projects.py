@@ -134,6 +134,10 @@ def get_project(
         "rpo_minutes":     latest_package.rpo_minutes     if latest_package else None,
     } if latest_package else None
 
+    from app.models.aws_resource import AWSResource
+    result["aws_resource_count"] = db.query(AWSResource).filter(
+        AWSResource.project_id == project_id
+    ).count()
     return {"success": True, "data": result}
 
 
