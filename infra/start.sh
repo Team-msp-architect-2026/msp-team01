@@ -37,9 +37,4 @@ aws ecs update-service \
   --region us-west-2 > /dev/null
 echo "✅ 프론트엔드 ECS Service 시작"
 
-aws ecs update-service --cluster autoops-cluster --service autoops-grafana-service    --desired-count 1 --region us-west-2 > /dev/null
-aws ecs update-service --cluster autoops-cluster --service autoops-prometheus-service --desired-count 1 --region us-west-2 > /dev/null
-aws ecs update-service --cluster autoops-cluster --service autoops-yace-service       --desired-count 1 --region us-west-2 > /dev/null
-echo "✅ Grafana + Prometheus + YACE 시작"
-
 echo "🚀 AutoOps 플랫폼 인프라 시작 완료"

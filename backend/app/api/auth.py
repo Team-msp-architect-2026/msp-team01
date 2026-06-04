@@ -37,6 +37,9 @@ class ConfirmRequest(BaseModel):
     email: str
     code: str
 
+class UpdateMeRequest(BaseModel):
+    slack_webhook_url: str = None
+
 
 @router.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
@@ -223,5 +226,24 @@ def get_me(
             "user_id":  current_user.user_id,
             "email":    current_user.email,
             "name":     current_user.name,
+        },
+    }
+
+@router.patch("/me")
+def update_me(
+    request: UpdateMeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if request.slack_webhook_url is not None:
+        current_user.slack_webhook_url = request.slack_webhook_url
+        db.commit()
+    return {
+        "success": True,
+        "data": {
+            "user_id":           current_user.user_id,
+            "email":             current_user.email,
+            "name":              current_user.name,
+            "slack_webhook_url": current_user.slack_webhook_url,
         },
     }

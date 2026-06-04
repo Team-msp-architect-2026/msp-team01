@@ -261,7 +261,7 @@ async def get_project_metrics(
     ecs_cluster_name = ecs_cluster_res.resource_name if ecs_cluster_res else None
     ecs_service_name = ecs_service_res.resource_name if ecs_service_res else None
     alb_arn          = alb_res.resource_id_aws        if alb_res         else None
-    rds_identifier   = rds_res.resource_name          if rds_res         else None
+    rds_identifier   = rds_res.resource_name.lower() if rds_res         else None
     alb_dimension    = _extract_alb_dimension(alb_arn) if alb_arn        else None
 
     cw_resources = {
