@@ -22,13 +22,9 @@ class MirrorOpsPipelineService:
         self,
         project_id: str,
         deployment_id: str,
-        trigger_type: str,       # "deployment_completed" | "infra_changed" | "manual"
+        trigger_type: str,
         db: Session,
     ) -> str:
-        """
-        파이프라인을 실행하고 sync_id를 반환한다.
-        Phase 1이 완료되면 즉시 반환한다 (Phase 2는 비동기).
-        """
         # 프로젝트 및 AWS 계정 조회
         project = db.query(Project).filter(
             Project.project_id == project_id
@@ -37,8 +33,8 @@ class MirrorOpsPipelineService:
             AWSAccount.account_id == project.account_id
         ).first()
 
-        # GCP 인증 설정 — project별 SA 키 사용
-        gcp_project_id = project.gcp_project_id or settings.gcp_project_id
+        # GCP 인증 설정 — project별 SA 키 사용 (폴백 없음)
+        gcp_project_id = project.gcp_project_id
         setup_gcp_auth(project=project)
 
         # sync_history 레코드 생성
@@ -58,7 +54,6 @@ class MirrorOpsPipelineService:
         db.commit()
 
         try:
-            # 기존 GCPMapping, AWSResource 삭제 (UUID 불일치 방지)
             from app.models.gcp_mapping import GCPMapping as GCPMappingModel
             from app.models.aws_resource import AWSResource as AWSResourceModel
 
@@ -70,10 +65,8 @@ class MirrorOpsPipelineService:
             ).delete()
             db.commit()
 
-            # ① 리소스 감지 (FR-B-003)
-            assumed_session = boto3.Session(
-                region_name=project.region,
-            )
+            # ① 리소스 감지
+            assumed_session = boto3.Session(region_name=project.region)
             detector = ResourceDetector(
                 role_arn    = account.role_arn,
                 region      = project.region,
@@ -88,7 +81,7 @@ class MirrorOpsPipelineService:
             sync.aws_resources_detected = len(aws_resources)
             db.commit()
 
-            # ② 매핑 엔진 (FR-B-004, FR-B-005)
+            # ② 매핑 엔진
             mapper   = MappingEngine()
             mappings = mapper.map_all(
                 aws_resources = aws_resources,
@@ -99,7 +92,6 @@ class MirrorOpsPipelineService:
             sync.gcp_resources_mapped = len(mappings)
             db.commit()
 
-            # ── [추가] 변경 감지 — 이전 동기화와 리소스 수 비교 ──────────────
             from app.models.sync_history import DRPackage as DRPackageModel
 
             previous_sync = db.query(SyncHistory).filter(
@@ -108,17 +100,16 @@ class MirrorOpsPipelineService:
                 SyncHistory.sync_id    != sync.sync_id,
             ).order_by(SyncHistory.started_at.desc()).first()
 
-            has_changes = True  # 기본값: 변경 있음으로 간주
+            has_changes = True
 
             if previous_sync:
                 prev_count = previous_sync.aws_resources_detected or 0
                 curr_count = len(aws_resources)
                 if prev_count == curr_count and curr_count > 0:
-                    has_changes = False  # 리소스 수 동일 → 변경 없음으로 간주
+                    has_changes = False
 
-            # ③ GCP Terraform HCL 생성 + DR Package — 변경 있을 때만 실행
+            # ③ GCP Terraform HCL 생성 + DR Package
             if has_changes:
-                # 기존 is_latest 패키지 False로 변경
                 db.query(DRPackageModel).filter(
                     DRPackageModel.project_id == project_id,
                     DRPackageModel.is_latest  == True,
@@ -151,17 +142,14 @@ class MirrorOpsPipelineService:
                     db          = db,
                 )
             else:
-                # 변경 없음 → DR Package 재생성 스킵
                 print(f"[MirrorOps] 변경 없음 — DR Package 재생성 스킵 (project_id={project_id})")
 
-                # [추가] 변경 없음: 최신 패키지가 ready면 dr_status 복원
                 latest_pkg = db.query(DRPackageModel).filter(
                     DRPackageModel.project_id == project_id,
                     DRPackageModel.is_latest  == True,
                 ).first()
                 if latest_pkg and latest_pkg.status == "ready":
                     project.dr_status = "ready"
-                    # [추가] 스냅샷 Export 완료 시 체크리스트도 동기화
                     if latest_pkg.snapshot_status == "ready" and latest_pkg.checklist:
                         updated = []
                         for item in latest_pkg.checklist:
@@ -172,7 +160,6 @@ class MirrorOpsPipelineService:
                         latest_pkg.checklist = updated
                 db.commit()
 
-            # [추가] Phase 1 완료 → sync 상태 업데이트
             sync.status       = "completed"
             sync.completed_at = datetime.utcnow()
             db.commit()

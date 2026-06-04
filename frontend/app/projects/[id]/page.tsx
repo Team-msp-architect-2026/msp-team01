@@ -98,7 +98,7 @@ export default function GovernancePage() {
       ])
       setProject(projRes.data.data)
       setDrift(driftRes.data.data.slice(0, 5))
-      setTotalDriftAll(driftRes.data.data.length)
+      setTotalDriftAll(driftRes.data.data.filter((d: any) => d.status === 'detected').length)
       setAudit(auditRes.data.data.items?.slice(0, 5) || [])
       setTotal(projRes.data.data?.aws_resource_count || 0)
 
@@ -298,7 +298,7 @@ export default function GovernancePage() {
                : project.dr_status === 'syncing' ? 'Syncing'
                : 'Not Ready'}
             </div>
-            <div className="gv-kpi-foot">GCP us-central1</div>
+            <div className="gv-kpi-foot">GCP us-west1</div>
           </div>
 
           <div className="gv-kpi">

@@ -20,7 +20,6 @@ async def start_sqs_worker():
 
     while True:
         try:
-            # 동기 boto3 호출을 별도 스레드로 분리
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(
                 None,
@@ -37,20 +36,16 @@ async def start_sqs_worker():
                 receipt_handle = msg["ReceiptHandle"]
                 body = json.loads(msg["Body"])
 
-                # EventBridge 이벤트 파싱
                 detail_type = body.get("detail-type", "")
                 detail      = body.get("detail", {})
 
                 try:
                     if detail_type == "InfraDeploymentCompleted":
-                        # §7-8 CraftOps → MirrorOps 트리거
                         await _handle_deployment_completed(detail)
 
                     elif detail_type == "RDS DB Snapshot Event":
-                        # Phase 2 트리거
                         await _handle_rds_snapshot_completed(detail)
 
-                    # 처리 완료 → 큐에서 삭제
                     sqs.delete_message(
                         QueueUrl      = queue_url,
                         ReceiptHandle = receipt_handle,
@@ -58,7 +53,6 @@ async def start_sqs_worker():
 
                 except Exception as e:
                     print(f"[MirrorOps Worker] 메시지 처리 실패:{e}")
-                    # 실패 시 VisibilityTimeout 후 재처리
 
         except Exception as e:
             print(f"[MirrorOps Worker] SQS 수신 오류:{e}")
@@ -68,6 +62,18 @@ async def start_sqs_worker():
 async def _handle_deployment_completed(detail: dict):
     db = SessionLocal()
     try:
+        from app.models.project import Project
+
+        # GCP 미연동 시 DR 패키지 자동 생성 스킵
+        # GCP 연동 후 사용자가 직접 MirrorOps 페이지에서 수동 실행
+        project = db.query(Project).filter(
+            Project.project_id == detail["project_id"]
+        ).first()
+
+        if not project or not project.gcp_project_id:
+            print(f"[MirrorOps Worker] GCP 미연동 — DR 패키지 자동 생성 스킵 (project_id={detail['project_id']})")
+            return
+
         pipeline = MirrorOpsPipelineService()
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
@@ -91,9 +97,8 @@ async def _handle_rds_snapshot_completed(detail: dict):
         snapshot_arn = detail.get("SourceArn", "")
 
         if "autoops" not in snapshot_id:
-            return  # AutoOps가 생성한 스냅샷이 아니면 무시
+            return
 
-        # snapshot_id에서 project_id 추출 (형식: autoops-{project_id_8자리}-{timestamp})
         parts = snapshot_id.split("-")
         if len(parts) < 2:
             return
@@ -101,7 +106,6 @@ async def _handle_rds_snapshot_completed(detail: dict):
         from app.models.sync_history import DRPackage
         from app.models.project import Project
 
-        # snapshot_ref.json에서 package_id 조회
         package = db.query(DRPackage).filter(
             DRPackage.snapshot_status == "pending",
         ).order_by(DRPackage.created_at.desc()).first()

@@ -96,6 +96,7 @@ RULE_BASED_MAP: dict[str, dict] = {
         "mapping":    lambda cfg: {
             "database_version": f"POSTGRES_{cfg.get('EngineVersion', '15').split('.')[0]}",
             "region":           "us-west1",
+            "deletion_protection": False, 
             "settings": {
                 "tier":              "db-f1-micro",
                 "availability_type": "REGIONAL" if cfg.get("MultiAZ") else "ZONAL",

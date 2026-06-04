@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -465,8 +465,6 @@ def _run_failover_simulation(
         db.close()
 
 
-# ── Actual 실행 ──────────────────────────────────────────────────────
-
 async def _run_failover_actual(
     project_id: str,
     failover_id: str,
@@ -474,188 +472,54 @@ async def _run_failover_actual(
     project:     "Project",
     role_arn:    str,
 ) -> None:
-    """
-    GCP actual 페일오버 실행. BackgroundTask로 동작한다.
-
-    흐름:
-    ① S3에서 main.tf 다운로드
-    ② GCP 인증 설정 (Secrets Manager)
-    ③ GCS State 버킷 자동 생성
-    ④ terraform init → apply (CloudWatch 로그 스트리밍)
-    ⑤ failover_history.status → completed + RTO 기록
-    """
     from app.core.config import settings
-    from app.services.mirrorops.gcp_auth import setup_gcp_auth
 
-    started_at = datetime.utcnow()
-    work_dir   = None
-    db         = SessionLocal()
-    log_group  = f"/autoops/failover/{failover_id}"
-
-    cw = boto3.client("logs", region_name="us-west-2")
-
-    def _log(msg: str):
-        print(f"[Failover {failover_id}] {msg}")
-        try:
-            cw.put_log_events(
-                logGroupName  = log_group,
-                logStreamName = "failover",
-                logEvents     = [{"timestamp": int(datetime.utcnow().timestamp() * 1000), "message": msg}],
-            )
-        except Exception:
-            pass
-
-    def _update_status(new_status: str, error_msg: str = "", rto_seconds: int = None, resources_created: int = None):
-        fh = db.query(FailoverHistory).filter(
-            FailoverHistory.failover_id == failover_id
-        ).first()
-        if fh:
-            fh.status       = new_status
-            fh.completed_at = datetime.utcnow()
-            if error_msg:
-                fh.error_message = error_msg
-            if rto_seconds is not None:
-                fh.actual_rto_seconds = rto_seconds
-            if resources_created is not None:
-                fh.gcp_resources_created = resources_created
-            db.commit()
+    ecs = boto3.client("ecs", region_name="us-west-2")
+    tf_key    = f"projects/{project_id}/latest/infrastructure/main.tf"
+    s3_path   = f"s3://autoops-dr-packages/{tf_key}"
 
     try:
-        # CloudWatch 로그 그룹 생성
-        try:
-            cw.create_log_group(logGroupName=log_group)
-            cw.create_log_stream(logGroupName=log_group, logStreamName="failover")
-        except cw.exceptions.ResourceAlreadyExistsException:
-            pass
-
-        # ① S3에서 main.tf 다운로드
-        _log("S3에서 main.tf 다운로드 중...")
-        s3       = boto3.client("s3", region_name="us-west-2")
-        work_dir = tempfile.mkdtemp(prefix=f"autoops-failover-{project_id[:8]}-")
-        tf_key   = f"projects/{project_id}/latest/infrastructure/main.tf"
-
-        s3.download_file("autoops-dr-packages", tf_key, str(Path(work_dir) / "main.tf"))
-        _log("main.tf 다운로드 완료")
-
-        # gcp_project_id 결정 — 연동된 프로젝트 우선
-        gcp_project_id = project.gcp_project_id or settings.gcp_project_id
-
-        # ② GCP 인증
-        _log("GCP 인증 설정 중...")
-        setup_gcp_auth(project=project)
-        _log(f"GCP 인증 완료 (프로젝트: {gcp_project_id})")
-
-        # ③ GCS State 버킷 생성
-        bucket_name = f"autoops-dr-state-{project_id}"
-        _log(f"GCS State 버킷 확인: {bucket_name}")
-        try:
-            from google.cloud import storage as gcs_storage
-            gcs = gcs_storage.Client()
-            if not gcs.bucket(bucket_name).exists():
-                bucket = gcs.create_bucket(bucket_name, location="us-west1")
-                bucket.versioning_enabled = True
-                bucket.patch()
-                _log(f"GCS 버킷 생성 완료: {bucket_name}")
-            else:
-                _log(f"GCS 버킷 이미 존재: {bucket_name}")
-        except Exception as e:
-            _log(f"⚠️ GCS 버킷 처리 중 오류 (계속 진행): {e}")
-
-        # ④ terraform init
-        _log("terraform init 실행 중...")
-        env = {**os.environ, "TF_IN_AUTOMATION": "1"}
-
-        init_result = subprocess.run(
-            ["terraform", "init", "-no-color", "-reconfigure"],
-            cwd=work_dir, capture_output=True, text=True, timeout=120, env=env,
+        ecs.run_task(
+            cluster        = "autoops-cluster",
+            taskDefinition = "autoops-failover-runner",
+            launchType     = "FARGATE",
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets":        ["subnet-0d215b0dbeeb14fcd", "subnet-009137f901eda3457"],
+                    "securityGroups": ["sg-03765069875b4e4c2"],
+                    "assignPublicIp": "DISABLED",
+                }
+            },
+            overrides={
+                "containerOverrides": [{
+                    "name": "failover-runner",
+                    "environment": [
+                        {"name": "FAILOVER_ID",       "value": failover_id},
+                        {"name": "PROJECT_ID",        "value": project_id},
+                        {"name": "HCL_S3_PATH",       "value": s3_path},
+                        {"name": "GCP_SECRET_ARN",    "value": project.gcp_secret_arn or ""},
+                        {"name": "GCP_PROJECT_ID",    "value": project.gcp_project_id or ""},
+                        {"name": "ACTION",            "value": "apply"},
+                        {"name": "BACKEND_API_URL",   "value": settings.backend_api_url},
+                        {"name": "INTERNAL_SECRET",   "value": settings.internal_secret},
+                    ],
+                }]
+            },
         )
-        for line in init_result.stdout.splitlines():
-            if line.strip():
-                _log(line)
-        if init_result.returncode != 0:
-            raise RuntimeError(f"terraform init 실패:\n{init_result.stderr}")
-        _log("terraform init 완료")
-
-        # ⑤ terraform apply
-        _log("terraform apply 실행 중 (GCP 리소스 생성 시작)...")
-        _log("Cloud SQL 생성에 약 10~15분 소요됩니다.")
-
-        import re as _re
-        resources_created = 0
-
-        apply_proc = subprocess.Popen(
-            ["terraform", "apply", "-auto-approve", "-no-color", "-json"],
-            cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, env=env,
-        )
-
-        for line in apply_proc.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                msg   = event.get("@message", "")
-                if msg:
-                    _log(msg)
-                    if "Apply complete!" in msg:
-                        match = _re.search(r'(\d+) added', msg)
-                        if match:
-                            resources_created = int(match.group(1))
-            except json.JSONDecodeError:
-                _log(line)
-
-        apply_proc.wait(timeout=1200)
-        if apply_proc.returncode != 0:
-            raise RuntimeError(f"terraform apply 실패 (exit code {apply_proc.returncode})")
-
-        _log("✅ terraform apply 완료 — GCP 리소스 생성 성공")
-
-        # ── S3 parquet → Cloud SQL 데이터 복원 추가 ─────────────────────
-        _log("Cloud SQL 데이터 복원 시작...")
-        await _import_snapshot_to_cloud_sql(
-            project_id  = project_id,
-            package     = package,
-            bucket_name = bucket_name,
-            gcp_project = gcp_project_id,
-            log_fn      = _log,
-        )
-        _log("✅ Cloud SQL 데이터 복원 완료")
-
-
-        # ⑥ RTO 계산 및 DB 업데이트
-        rto_seconds = int((datetime.utcnow() - started_at).total_seconds())
-        _log(f"실제 RTO: {rto_seconds // 60}분 {rto_seconds % 60}초")
-        _update_status("completed", rto_seconds=rto_seconds, resources_created=resources_created)
-
-        from app.services.governance.audit_logger import log_platform_action
-        from app.core.database import SessionLocal
-        _audit_db = SessionLocal()
-        try:
-            log_platform_action(
-                db         = _audit_db,
-                action     = "failover_execute",
-                user_id    = project.user_id,
-                project_id = project_id,
-                detail     = {
-                    "failover_id": failover_id,
-                    "rto_seconds": rto_seconds,
-                    "mode":        "actual",
-                },
-            )
-            _audit_db.commit()
-        finally:
-            _audit_db.close()
-
+        print(f"[Failover {failover_id}] ECS Task 시작됨")
     except Exception as e:
-        err_msg = str(e)
-        _log(f"❌ 페일오버 실패: {err_msg}")
-        _update_status("failed", error_msg=err_msg[:1000])
-
-    finally:
-        if work_dir and os.path.exists(work_dir):
-            shutil.rmtree(work_dir, ignore_errors=True)
-        db.close()
+        db = SessionLocal()
+        try:
+            fh = db.query(FailoverHistory).filter(
+                FailoverHistory.failover_id == failover_id
+            ).first()
+            if fh:
+                fh.status        = "failed"
+                fh.error_message = str(e)[:1000]
+                fh.completed_at  = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
 
 
 # ── terraform_code PATCH ─────────────────────────────────────────────
@@ -880,7 +744,7 @@ def destroy_gcp_resources(
             detail={"code": "BAD_REQUEST", "message": "simulation 모드는 삭제할 GCP 리소스가 없습니다."},
         )
 
-    if fh.status not in ("completed", "failed"):
+    if fh.status not in ("completed", "failed", "running", "destroy_failed", "destroying"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -911,131 +775,61 @@ async def _run_failover_destroy(
     project_id:  str,
     failover_id: str,
 ) -> None:
-    """
-    terraform destroy로 GCP 리소스 삭제.
-
-    흐름:
-    ① S3에서 main.tf 다운로드
-    ② GCP 인증
-    ③ terraform init → destroy
-    ④ GCS import 파일 정리
-    ⑤ failover_history.status → destroyed
-    """
-    from app.services.mirrorops.gcp_auth import setup_gcp_auth
     from app.core.config import settings
-
-    db       = SessionLocal()
-    work_dir = None
-    # project 조회 (gcp_secret_arn 사용을 위해)
     from app.models.project import Project as ProjectModel
+
+    db      = SessionLocal()
     project = db.query(ProjectModel).filter(
         ProjectModel.project_id == project_id
     ).first()
-    cw       = boto3.client("logs", region_name="us-west-2")
-    log_group = f"/autoops/failover/{failover_id}"
+    db.close()
 
-    def _log(msg: str):
-        print(f"[Destroy{failover_id}]{msg}")
-        try:
-            cw.put_log_events(
-                logGroupName  = log_group,
-                logStreamName = "failover",
-                logEvents     = [{"timestamp": int(datetime.utcnow().timestamp() * 1000), "message": msg}],
-            )
-        except Exception:
-            pass
-
-    def _update_status(new_status: str, error_msg: str = "", rto_seconds: int = None, resources_created: int = None):
-        fh = db.query(FailoverHistory).filter(
-            FailoverHistory.failover_id == failover_id
-        ).first()
-        if fh:
-            fh.status       = new_status
-            fh.completed_at = datetime.utcnow()
-            if error_msg:
-                fh.error_message = error_msg
-            if rto_seconds is not None:
-                fh.actual_rto_seconds    = rto_seconds
-            if resources_created is not None:
-                fh.gcp_resources_created = resources_created
-            db.commit()
+    ecs     = boto3.client("ecs", region_name="us-west-2")
+    tf_key  = f"projects/{project_id}/latest/infrastructure/main.tf"
+    s3_path = f"s3://autoops-dr-packages/{tf_key}"
 
     try:
-        # ① S3에서 main.tf 다운로드
-        _log("S3에서 main.tf 다운로드 중...")
-        s3       = boto3.client("s3", region_name="us-west-2")
-        work_dir = tempfile.mkdtemp(prefix=f"autoops-destroy-{project_id[:8]}-")
-        tf_key   = f"projects/{project_id}/latest/infrastructure/main.tf"
-        s3.download_file("autoops-dr-packages", tf_key, str(Path(work_dir) / "main.tf"))
-        _log("main.tf 다운로드 완료")
-
-        # ② GCP 인증
-        _log("GCP 인증 설정 중...")
-        setup_gcp_auth(project=project)
-        _log("GCP 인증 완료")
-
-        env = {**os.environ, "TF_IN_AUTOMATION": "1"}
-
-        # ③ terraform init
-        _log("terraform init 실행 중...")
-        init_result = subprocess.run(
-            ["terraform", "init", "-no-color", "-reconfigure"],
-            cwd=work_dir, capture_output=True, text=True, timeout=120, env=env,
+        ecs.run_task(
+            cluster        = "autoops-cluster",
+            taskDefinition = "autoops-failover-runner",
+            launchType     = "FARGATE",
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets":        ["subnet-0d215b0dbeeb14fcd", "subnet-009137f901eda3457"],
+                    "securityGroups": ["sg-03765069875b4e4c2"],
+                    "assignPublicIp": "DISABLED",
+                }
+            },
+            overrides={
+                "containerOverrides": [{
+                    "name": "failover-runner",
+                    "environment": [
+                        {"name": "FAILOVER_ID",       "value": failover_id},
+                        {"name": "PROJECT_ID",        "value": project_id},
+                        {"name": "HCL_S3_PATH",       "value": s3_path},
+                        {"name": "GCP_SECRET_ARN",    "value": project.gcp_secret_arn or "" if project else ""},
+                        {"name": "GCP_PROJECT_ID",    "value": project.gcp_project_id or "" if project else ""},
+                        {"name": "ACTION",            "value": "destroy"},
+                        {"name": "BACKEND_API_URL",   "value": settings.backend_api_url},
+                        {"name": "INTERNAL_SECRET",   "value": settings.internal_secret},
+                    ],
+                }]
+            },
         )
-        if init_result.returncode != 0:
-            raise RuntimeError(f"terraform init 실패:\n{init_result.stderr}")
-        _log("terraform init 완료")
-
-        # ③ terraform destroy
-        _log("terraform destroy 실행 중 (GCP 리소스 삭제 시작)...")
-        destroy_proc = subprocess.Popen(
-            ["terraform", "destroy", "-auto-approve", "-no-color", "-json"],
-            cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, env=env,
-        )
-        for line in destroy_proc.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                msg   = event.get("@message", "")
-                if msg:
-                    _log(msg)
-            except json.JSONDecodeError:
-                _log(line)
-
-        destroy_proc.wait(timeout=600)  # 최대 10분
-        if destroy_proc.returncode != 0:
-            raise RuntimeError(f"terraform destroy 실패 (exit code{destroy_proc.returncode})")
-        _log("✅ terraform destroy 완료 — GCP 리소스 삭제 성공")
-
-        # ④ GCS import 파일 정리
-        bucket_name = f"autoops-dr-state-{project_id}"
-        try:
-            from google.cloud import storage as gcs_storage
-            gcs    = gcs_storage.Client()
-            bucket = gcs.bucket(bucket_name)
-            blobs  = list(bucket.list_blobs(prefix="import/"))
-            if blobs:
-                bucket.delete_blobs(blobs)
-                _log(f"GCS import 파일 정리 완료:{len(blobs)}개")
-        except Exception as e:
-            _log(f"⚠️ GCS 정리 중 오류 (무시):{e}")
-
-        # ⑤ 상태 업데이트
-        _update_status("destroyed")
-        _log("✅ GCP 리소스 삭제 완료")
-
+        print(f"[Destroy {failover_id}] ECS Task 시작됨")
     except Exception as e:
-        err_msg = str(e)
-        _log(f"❌ GCP 리소스 삭제 실패:{err_msg}")
-        _update_status("destroy_failed", error_msg=err_msg[:1000])
-
-    finally:
-        if work_dir and os.path.exists(work_dir):
-            shutil.rmtree(work_dir, ignore_errors=True)
-        db.close()
+        db = SessionLocal()
+        try:
+            fh = db.query(FailoverHistory).filter(
+                FailoverHistory.failover_id == failover_id
+            ).first()
+            if fh:
+                fh.status        = "destroy_failed"
+                fh.error_message = str(e)[:1000]
+                fh.completed_at  = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
 
 # ── GET /api/mirror/{project_id}/failover-history ──────────────────
 
@@ -1068,3 +862,48 @@ def get_failover_history(
             for fh in history
         ],
     }
+
+# ── Internal Failover Complete (ECS Task → Backend) ─────────────────
+
+class FailoverCompleteBody(BaseModel):
+    action: str   # "apply" | "destroy"
+    status: str   # "success" | "failed"
+    error:  Optional[str] = None
+    resources_created: Optional[int] = None 
+
+@router.post("/{project_id}/failover/{failover_id}/internal-complete")
+def internal_failover_complete(
+    failover_id: str,
+    body: FailoverCompleteBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from app.core.config import settings
+    secret = request.headers.get("X-Internal-Secret", "")
+    if secret != settings.internal_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    fh = db.query(FailoverHistory).filter(
+        FailoverHistory.failover_id == failover_id
+    ).first()
+    if not fh:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if body.action == "destroy":
+        fh.status = "destroyed" if body.status == "success" else "destroy_failed"
+    else:
+        fh.status = "completed" if body.status == "success" else "failed"
+
+    if body.error:
+        fh.error_message = body.error[:1000]
+
+    if body.action != "destroy" and body.status == "success":
+        if fh.started_at:
+            fh.actual_rto_seconds = int((datetime.utcnow() - fh.started_at).total_seconds())
+
+    if body.resources_created is not None:
+        fh.gcp_resources_created = body.resources_created
+    
+    fh.completed_at = datetime.utcnow()
+    db.commit()
+    return {"success": True}
