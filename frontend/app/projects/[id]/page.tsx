@@ -84,6 +84,10 @@ export default function GovernancePage() {
   const [actionId, setActionId]    = useState<string | null>(null)
   const [regenerating, setRegen]   = useState(false)
   const [loading, setLoading]      = useState(true)
+  const [slackModal, setSlackModal]   = useState(false)
+  const [slackUrl, setSlackUrl]       = useState('')
+  const [slackSaving, setSlackSaving] = useState(false)
+  const parseUTC = (s: string) => new Date(s.endsWith('Z') ? s : s + 'Z')
 
   const fetchAll = useCallback(async () => {
     try {
@@ -96,10 +100,7 @@ export default function GovernancePage() {
       setDrift(driftRes.data.data.slice(0, 5))
       setTotalDriftAll(driftRes.data.data.length)
       setAudit(auditRes.data.data.items?.slice(0, 5) || [])
-
-      apiClient.get(`/api/projects/${projectId}/resources`)
-        .then(res => setTotal(res.data.data?.total_resources || 0))
-        .catch(() => {})
+      setTotal(projRes.data.data?.aws_resource_count || 0)
 
       apiClient.get(`/api/projects/${projectId}/documents`)
         .then(res => setDiagram(res.data.data))
@@ -148,6 +149,16 @@ export default function GovernancePage() {
       await apiClient.post(`/api/projects/${projectId}/documents/regenerate`)
       setTimeout(() => { fetchAll(); setRegen(false) }, 120_000)
     } catch { setRegen(false) }
+  }
+
+  const handleSlackSave = async () => {
+    setSlackSaving(true)
+    try {
+      await apiClient.patch('/api/auth/me', { slack_webhook_url: slackUrl })
+      setSlackModal(false)
+    } finally {
+      setSlackSaving(false)
+    }
   }
 
   if (loading) {
@@ -215,6 +226,19 @@ export default function GovernancePage() {
             </div>
           </div>
           <div className="gv-head-actions">
+            <button className="gv-btn" onClick={() => setSlackModal(true)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/>
+                <path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
+                <path d="M9.5 14c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5S8 21.33 8 20.5v-5c0-.83.67-1.5 1.5-1.5z"/>
+                <path d="M3.5 14H5v1.5c0 .83-.67 1.5-1.5 1.5S2 16.33 2 15.5 2.67 14 3.5 14z"/>
+                <path d="M14 14.5c0-.83.67-1.5 1.5-1.5h5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-5c-.83 0-1.5-.67-1.5-1.5z"/>
+                <path d="M15.5 19H14v1.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5-.67-1.5-1.5-1.5z"/>
+                <path d="M10 9.5C10 8.67 9.33 8 8.5 8H3.5C2.67 8 2 8.67 2 9.5S2.67 11 3.5 11h5c.83 0 1.5-.67 1.5-1.5z"/>
+                <path d="M8.5 5H10V3.5C10 2.67 9.33 2 8.5 2S7 2.67 7 3.5 7.67 5 8.5 5z"/>
+              </svg>
+              Slack 연동
+            </button>
             <button className="gv-btn" onClick={() => router.push(`/projects/${projectId}/mirror`)}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                 <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -245,7 +269,7 @@ export default function GovernancePage() {
             <div className="gv-kpi-value">
               {totalResources}<small>개</small>
             </div>
-            <div className="gv-kpi-foot">온보딩 스캔 기준</div>
+            <div className="gv-kpi-foot">감지된 리소스 기준</div>
           </div>
 
           <div className="gv-kpi" data-tone={detectedCount > 0 ? 'red' : 'green'}>
@@ -284,7 +308,7 @@ export default function GovernancePage() {
             </div>
             <div className="gv-kpi-value gv-kpi-value-text">
               {auditLogs[0]
-                ? new Date(auditLogs[0].created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+                ? parseUTC(auditLogs[0].created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
                 : '—'}
             </div>
             <div className="gv-kpi-foot">
@@ -453,7 +477,7 @@ export default function GovernancePage() {
                           <span>{log.actor?.split('@')[0] || log.actor}</span>
                           <span className="gv-dot-sep" />
                           <span>
-                            {new Date(log.created_at).toLocaleString('ko-KR', {
+                            {parseUTC(log.created_at).toLocaleString('ko-KR', {
                               month: '2-digit', day: '2-digit',
                               hour: '2-digit', minute: '2-digit',
                             })}
@@ -484,7 +508,7 @@ export default function GovernancePage() {
               <span>아키텍처 다이어그램</span>
               {diagram?.generated_at && (
                 <span className="gv-panel-meta">
-                  {new Date(diagram.generated_at).toLocaleString('ko-KR', {
+                  {parseUTC(diagram.generated_at).toLocaleString('ko-KR', {
                     month: '2-digit', day: '2-digit',
                     hour: '2-digit', minute: '2-digit',
                   })} 생성
@@ -548,6 +572,55 @@ export default function GovernancePage() {
             </div>
           )}
         </div>
+
+        {/* ── Slack 연동 모달 ── */}
+        {slackModal && (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 50,
+            background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }} onClick={() => setSlackModal(false)}>
+            <div style={{
+              background: '#13151f', border: '1px solid rgba(255,255,255,0.13)',
+              borderRadius: '16px', padding: '28px', width: '460px', maxWidth: '90vw',
+            }} onClick={e => e.stopPropagation()}>
+              <div style={{ marginBottom: '20px' }}>
+                <div style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontWeight: 700, fontSize: '16px', marginBottom: '6px' }}>
+                  Slack 알림 연동
+                </div>
+                <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: '12px', color: '#7a8298' }}>
+                  Drift 감지 시 해당 Webhook으로 알림이 발송됩니다
+                </div>
+              </div>
+              <input
+                type="text"
+                placeholder="https://hooks.slack.com/services/..."
+                value={slackUrl}
+                onChange={e => setSlackUrl(e.target.value)}
+                style={{
+                  width: '100%', padding: '10px 14px',
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.13)',
+                  borderRadius: '8px', color: '#edf0f6',
+                  fontFamily: "'JetBrains Mono',monospace", fontSize: '12px',
+                  outline: 'none', boxSizing: 'border-box', marginBottom: '16px',
+                }}
+              />
+              <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                <button className="gv-btn" onClick={() => setSlackModal(false)}>취소</button>
+                <button
+                  className="gv-btn-primary"
+                  style={{ padding: '9px 18px', fontSize: '13px' }}
+                  disabled={!slackUrl || slackSaving}
+                  onClick={handleSlackSave}
+                >
+                  {slackSaving ? '저장 중...' : '저장'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     </>
   )

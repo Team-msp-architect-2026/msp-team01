@@ -898,9 +898,10 @@ def _run_detect_all(project_id: str, role_arn: str, external_id: str, prefix: st
     from app.services.mirrorops.detector import ResourceDetector
     from app.models.aws_resource import AWSResource
     from app.models.project import Project
+    from app.models.governance import ResourceBaseline
+    import uuid
     db = SessionLocal()
     try:
-        # GCP 연동 프로젝트는 pipeline.run()에서 처리하므로 스킵
         project = db.query(Project).filter(
             Project.project_id == project_id
         ).first()
@@ -915,8 +916,29 @@ def _run_detect_all(project_id: str, role_arn: str, external_id: str, prefix: st
         db.commit()
 
         detector = ResourceDetector(role_arn=role_arn, region=region, external_id=external_id)
-        detector.detect_all(project_id=project_id, prefix=prefix, environment=environment, db=db)
+        detected = detector.detect_all(project_id=project_id, prefix=prefix, environment=environment, db=db)
         print(f"[CraftOps] 리소스 감지 완료: project_id={project_id}")
+
+        # ── Baseline 등록 (기존 삭제 후 재등록) ──────────────────────
+        db.query(ResourceBaseline).filter(
+            ResourceBaseline.project_id == project_id,
+            ResourceBaseline.source     == "craftops_deploy",
+        ).delete(synchronize_session=False)
+        db.commit()
+
+        for res in detected:
+            baseline = ResourceBaseline(
+                id              = str(uuid.uuid4()),
+                project_id      = project_id,
+                source          = "craftops_deploy",
+                resource_type   = res.resource_type,
+                resource_id_aws = res.resource_id_aws,
+                baseline_config = res.config_json,
+            )
+            db.add(baseline)
+        db.commit()
+        print(f"[CraftOps] Baseline 등록 완료: {len(detected)}개")
+
     except Exception as e:
         print(f"[CraftOps] 리소스 감지 실패: {e}")
     finally:

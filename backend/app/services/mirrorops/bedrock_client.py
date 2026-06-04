@@ -199,7 +199,7 @@ AWS 설정:
         })
 
         response = self.client.invoke_model(
-            modelId     = "anthropic.claude-sonnet-4-20250514-v1:0",
+            modelId     = "us.anthropic.claude-sonnet-4-20250514-v1:0",
             body        = body,
             contentType = "application/json",
             accept      = "application/json",
