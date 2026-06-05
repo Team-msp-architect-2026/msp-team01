@@ -92,17 +92,16 @@ fi
 # ── 완료 상태 백엔드로 전송 ─────────────────────────────────────────
 if [ "${TF_EXIT}" -eq 0 ]; then
     _log "✅ terraform ${ACTION} 완료"
-    curl -s -X POST "${BACKEND_API_URL}/api/mirror/${PROJECT_ID}/failover/${FAILOVER_ID}/internal-complete" \
-      -H "Content-Type: application/json" \
-      -H "X-Internal-Secret: ${INTERNAL_SECRET}" \
-      -d "{\"action\":\"${ACTION}\",\"status\":\"success\",\"resources_created\":${RESOURCES_ADDED}}"
-else
-    _log "❌ terraform ${ACTION} 실패 (exit code: ${TF_EXIT})"
-    curl -s -X POST "${BACKEND_API_URL}/api/mirror/${PROJECT_ID}/failover/${FAILOVER_ID}/internal-complete" \
-      -H "Content-Type: application/json" \
-      -H "X-Internal-Secret: ${INTERNAL_SECRET}" \
-      -d "{\"action\":\"${ACTION}\",\"status\":\"failed\",\"error\":\"terraform ${ACTION} 실패 (exit code ${TF_EXIT})\"}"
-    exit ${TF_EXIT}
-fi
+    if [ "${ACTION}" = "destroy" ]; then
+        curl -s -X POST "${BACKEND_API_URL}/api/mirror/${PROJECT_ID}/failover/${FAILOVER_ID}/internal-complete" \
+          -H "Content-Type: application/json" \
+          -H "X-Internal-Secret: ${INTERNAL_SECRET}" \
+          -d "{\"action\":\"${ACTION}\",\"status\":\"success\"}"
+    else
+        curl -s -X POST "${BACKEND_API_URL}/api/mirror/${PROJECT_ID}/failover/${FAILOVER_ID}/internal-complete" \
+          -H "Content-Type: application/json" \
+          -H "X-Internal-Secret: ${INTERNAL_SECRET}" \
+          -d "{\"action\":\"${ACTION}\",\"status\":\"success\",\"resources_created\":${RESOURCES_ADDED}}"
+    fi
 
 echo "[Failover Runner] 완료"
