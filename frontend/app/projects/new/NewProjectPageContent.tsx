@@ -137,7 +137,7 @@ export default function NewProjectPageContent() {
               </div>
               <h1 className="npc-step-title">AWS 인프라 구성 시작하기</h1>
               <p className="npc-step-desc">
-                프로젝트 정보를 입력하면 CraftOps가 16개 AWS 리소스를 자동으로 설계합니다.
+                프로젝트 정보를 입력하면 CraftOps가 20개 AWS 리소스를 자동으로 설계합니다.
               </p>
             </div>
 
@@ -149,7 +149,7 @@ export default function NewProjectPageContent() {
                 <div className="npc-input-wrap">
                   <input
                     className="npc-input"
-                    placeholder="예) Fortune 송금 서비스"
+                    placeholder="예) Lumos B2B SaaS 서비스"
                     value={projectForm.name}
                     onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
                   />
@@ -181,7 +181,7 @@ export default function NewProjectPageContent() {
                 <label className="npc-label">서비스 환경</label>
                 <div className="npc-env-grid">
                   {([
-                    { v: 'prod',    name: 'prod',    desc: '실서비스 (금융보안 자동 적용)', tone: 'orange' },
+                    { v: 'prod',    name: 'prod',    desc: '실서비스 (보안 요건 자동 적용)', tone: 'orange' },
                     { v: 'staging', name: 'staging', desc: '검증/테스트',                  tone: 'yellow' },
                     { v: 'dev',     name: 'dev',     desc: '개발용 (최소 사양)',            tone: 'blue' },
                   ] as const).map((opt) => (
@@ -293,10 +293,10 @@ export default function NewProjectPageContent() {
           region={projectForm.region}
           onExit={() => projectId && router.push(`/projects/${projectId}`)}
           title="리소스 네이밍 규칙을 확인해주세요."
-          description="아래 규칙으로 16개 리소스가 자동 네이밍됩니다. Prefix와 환경은 프로젝트 생성 시 입력한 값입니다."
+          description="아래 규칙으로 20개 리소스가 자동 네이밍됩니다. Prefix와 환경은 프로젝트 생성 시 입력한 값입니다."
           sidekick={
             isProd
-              ? 'prod 환경에는 Multi-AZ + 암호화 + 백업 30일이 자동 적용됩니다. 금융보안원 tfsec 보안 스캔 통과 요건입니다.'
+              ? 'prod 환경에는 Multi-AZ + 암호화 + 백업 30일이 자동 적용됩니다. tfsec 보안 스캔 통과 요건이며 기업 고객 SLA 대응의 기본.'
               : `${projectForm.environment} 환경 기준으로 최소 사양이 적용됩니다. 실서비스 전에 prod로 전환하세요.`
           }
           onNext={() =>
@@ -342,7 +342,7 @@ export default function NewProjectPageContent() {
               <span className="npc-mono-inline">
                 {projectForm.prefix || 'PREFIX'}-{projectForm.environment}-*
               </span>{' '}
-              형식으로 16개 리소스 이름이 확정됩니다.
+              형식으로 20개 리소스 이름이 확정됩니다.
             </p>
           )}
         </WizardLayout>
@@ -444,9 +444,9 @@ export default function NewProjectPageContent() {
           projectName={projectForm.name}
           region={projectForm.region}
           onExit={() => projectId && router.push(`/projects/${projectId}`)}
-          title="금융보안 3-Tier 망분리가 자동 적용됩니다."
-          description="외부망(ALB)이 탈취되더라도 내부 DB로의 침투를 구조적으로 차단하는 구성입니다. 금융위원회 전자금융업 보안 심사 망분리 요건을 자동 충족합니다."
-          sidekick="이 구성으로 금융위원회 전자금융업 보안 심사의 망분리 요건을 자동 충족합니다. 외부망(ALB)이 탈취되더라도 내부 DB로의 침투를 구조적으로 차단합니다."
+          title="3-Tier 망분리가 자동 적용됩니다."
+          description="외부망(ALB)이 탈취되더라도 내부 DB로의 침투를 구조적으로 차단하는 구성입니다. 기업 고객 SLA 및 보안 감사에 필요한 3-Tier 망분리 기준을 자동으로 충족합니다."
+          sidekick="ALB → App → DB 3계층 구조로 외부 침투 경로를 구조적으로 차단합니다. 기업 고객 SLA 요건에 필요한 최소 보안 기준을 자동으로 충족합니다."
           onPrev={() => setPhase('2-2')}
           onNext={() => handleSaveStep('2-3', {})}
           isSubmitting={isSubmitting}
@@ -618,7 +618,7 @@ export default function NewProjectPageContent() {
           description={`규제 요건 기반으로 ${projectForm.environment} 환경에 맞춰 PostgreSQL이 자동 구성됩니다.`}
           sidekick={
             isProd
-              ? '전자금융감독규정 준수를 위한 최소 보안 요건이 자동 적용됩니다. Multi-AZ + 백업 30일 + 암호화는 tfsec·checkov 필수 통과 조건입니다.'
+              ? '기업 고객 SLA 계약 및 tfsec·checkov 보안 스캔 통과를 위한 최소 요건이 자동 적용됩니다. Multi-AZ + 백업 30일 + 암호화는 tfsec·checkov 필수 통과 조건입니다.'
               : `${projectForm.environment} 환경 최소 사양이 적용됩니다. 개발팀이 직접 설정할 필요 없습니다.`
           }
           onPrev={() => setPhase('2-5')}
@@ -652,7 +652,7 @@ export default function NewProjectPageContent() {
                 <div className="npc-sg-key">백업 보존</div>
                 <div className="npc-sg-val">
                   <span className="npc-mono">{isProd ? '30일' : '0일'}</span>
-                  {isProd && <span className="npc-sg-note">금융보안원 요건</span>}
+                  {isProd && <span className="npc-sg-note">tfsec 권장 요건</span>}
                 </div>
               </div>
               <div className="npc-sg-row">
@@ -705,7 +705,7 @@ export default function NewProjectPageContent() {
               </div>
               <h1 className="npc-step-title">배포 전 최종 확인</h1>
               <p className="npc-step-desc">
-                아래 <span className="npc-emph">16개 리소스</span>가 AWS{' '}
+                아래 <span className="npc-emph">20개 리소스</span>가 AWS{' '}
                 <span className="npc-mono-inline">{projectForm.region}</span>에 생성됩니다. 배포 후 AWS 요금이 발생하니 내용을 확인하세요.
               </p>
             </div>
@@ -745,7 +745,7 @@ export default function NewProjectPageContent() {
                 <div className="npc-sum-head">
                   <div className="npc-sum-num">03</div>
                   <div className="npc-sum-title">보안 그룹</div>
-                  <div className="npc-sum-sub">금융보안 3-Tier 망분리</div>
+                  <div className="npc-sum-sub">3-Tier 망분리</div>
                 </div>
                 <div className="npc-sum-rows">
                   <div className="npc-sum-row"><span className="npc-mono">SG-ALB</span><span className="npc-mono">외부 → 443, 80</span></div>

@@ -183,12 +183,14 @@ AWS 설정:
 리소스 목록:
 {json.dumps(resource_summary, ensure_ascii=False, indent=2)}
 
-1. 이 인프라의 구조를 표현하는 Mermaid 다이어그램 코드 (graph TD 스타일)
-   - 리소스 간 연결 관계를 화살표로 표현
-   - 인터넷 트래픽 흐름 포함 (Internet → ALB → ECS → RDS 등)
+1. 핵심 트래픽 흐름만 표현하는 Mermaid 다이어그램 (graph LR 스타일)
+   - 노드는 최대 6개: Internet, ALB, ECS Service, RDS, NAT Gateway 위주
+   - 서브넷/라우팅테이블/보안그룹/IAM Role/LogGroup 제외
+   - 노드 라벨은 반드시 큰따옴표로 감싸기: A["ALB"]
+   - Internet → ALB → ECS → RDS 핵심 흐름 표현
    - 반드시 ```mermaid 코드블록으로 감싸기
 
-2. 리소스별 역할 및 전체적인 데이터 흐름/동작 방식 한국어 설명
+2. 인프라 구조 한국어 설명 (3~5줄 이내, 간결하게)
 
 마크다운 형식으로 응답하세요."""
 

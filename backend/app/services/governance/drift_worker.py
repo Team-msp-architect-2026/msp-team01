@@ -9,7 +9,7 @@ from app.core.config import settings
 
 # 심각도 분류 룰
 CRITICAL_CHANGES = {
-    "AWS::EC2::SecurityGroup": ["IpPermissions"],    # 인바운드 룰 변경
+    "AWS::EC2::SecurityGroup": ["ipPermissions"],    # 인바운드 룰 변경
     "AWS::RDS::DBInstance":    ["PubliclyAccessible"],# 퍼블릭 노출
 }
 HIGH_CHANGES = {

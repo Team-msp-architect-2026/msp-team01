@@ -943,3 +943,56 @@ def _run_detect_all(project_id: str, role_arn: str, external_id: str, prefix: st
         print(f"[CraftOps] 리소스 감지 실패: {e}")
     finally:
         db.close()
+
+@router.post("/{project_id}/rescan", status_code=202)
+def rescan_resources(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """리소스 재스캔 + Baseline 재등록 수동 트리거"""
+    project = db.query(Project).filter(
+        Project.project_id == project_id,
+        Project.user_id == current_user.user_id,
+    ).first()
+
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "프로젝트를 찾을 수 없습니다."},
+        )
+
+    if project.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "VALIDATION_ERROR", "message": "배포 완료된 프로젝트만 재스캔 가능합니다."},
+        )
+
+    account = db.query(AWSAccount).filter(
+        AWSAccount.account_id == project.account_id,
+    ).first()
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "연동된 AWS 계정을 찾을 수 없습니다."},
+        )
+
+    background_tasks.add_task(
+        _run_detect_all,
+        project_id  = project.project_id,
+        role_arn    = account.role_arn,
+        external_id = project.user_id,
+        prefix      = project.prefix,
+        environment = project.environment,
+        region      = project.region,
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "project_id": project_id,
+            "message":    "리소스 재스캔을 시작합니다. 30초 후 확인해주세요.",
+        },
+    }

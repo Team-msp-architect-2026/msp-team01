@@ -258,8 +258,8 @@ async def get_project_metrics(
     rds_res = find_res(["rds", "dbinstance"]) or find_res(["rds::dbinstance"])
 
     # ── 4. 리소스 식별자 정리 ─────────────────────────────────────────────────
-    ecs_cluster_name = ecs_cluster_res.resource_name if ecs_cluster_res else None
-    ecs_service_name = ecs_service_res.resource_name if ecs_service_res else None
+    ecs_cluster_name = ecs_cluster_res.resource_name.lower() if ecs_cluster_res else None
+    ecs_service_name = ecs_service_res.resource_name.lower() if ecs_service_res else None
     alb_arn          = alb_res.resource_id_aws        if alb_res         else None
     rds_identifier   = rds_res.resource_name.lower() if rds_res         else None
     alb_dimension    = _extract_alb_dimension(alb_arn) if alb_arn        else None
