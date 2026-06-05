@@ -102,10 +102,12 @@ function MetricPanel({
 }
 
 export default function InfraMetrics({ projectId }: Props) {
-  const [period, setPeriod]   = useState<Period>('1h')
-  const [data, setData]       = useState<MetricsData | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError]     = useState<string | null>(null)
+  const [period, setPeriod]     = useState<Period>('1h')
+  const [data, setData]         = useState<MetricsData | null>(null)
+  const [loading, setLoading]   = useState(false)
+  const [error, setError]       = useState<string | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [scanMsg, setScanMsg]   = useState<string | null>(null)
 
   const fetchMetrics = useCallback(async (p: Period) => {
     setLoading(true)
@@ -123,6 +125,23 @@ export default function InfraMetrics({ projectId }: Props) {
   }, [projectId])
 
   useEffect(() => { fetchMetrics(period) }, [period, fetchMetrics])
+
+  const handleRescan = async () => {
+    setScanning(true)
+    setScanMsg(null)
+    try {
+      await apiClient.post(`/api/craft/${projectId}/rescan`)
+      setScanMsg('스캔 중... 30초 후 자동 갱신됩니다')
+      setTimeout(() => {
+        fetchMetrics(period)
+        setScanning(false)
+        setScanMsg(null)
+      }, 30000)
+    } catch {
+      setScanning(false)
+      setScanMsg('스캔 요청 실패')
+    }
+  }
 
   const C = {
     cpu:        '#6366f1',
@@ -161,10 +180,23 @@ export default function InfraMetrics({ projectId }: Props) {
     </div>
   )
 
+  const btnBase: React.CSSProperties = {
+    padding: '5px 12px',
+    borderRadius: '7px',
+    border: '1px solid rgba(255,255,255,0.08)',
+    background: 'transparent',
+    color: '#475569',
+    fontSize: '12px',
+    cursor: 'pointer',
+    fontFamily: "'JetBrains Mono', monospace",
+    transition: 'all 150ms',
+    whiteSpace: 'nowrap',
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
-      {/* 기간 선택 + 새로고침 */}
+      {/* 기간 선택 + 새로고침 + 수동 스캔 */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{
           color: '#64748b', fontSize: '12px',
@@ -182,19 +214,12 @@ export default function InfraMetrics({ projectId }: Props) {
               key={value}
               onClick={() => setPeriod(value)}
               style={{
-                padding: '5px 12px',
-                borderRadius: '7px',
+                ...btnBase,
                 border: period === value
                   ? '1px solid rgba(99,102,241,0.6)'
                   : '1px solid rgba(255,255,255,0.08)',
-                background: period === value
-                  ? 'rgba(99,102,241,0.12)'
-                  : 'transparent',
+                background: period === value ? 'rgba(99,102,241,0.12)' : 'transparent',
                 color: period === value ? '#818cf8' : '#475569',
-                fontSize: '12px',
-                cursor: 'pointer',
-                fontFamily: "'JetBrains Mono', monospace",
-                transition: 'all 150ms',
               }}
             >
               {label}
@@ -203,21 +228,40 @@ export default function InfraMetrics({ projectId }: Props) {
           <button
             onClick={() => fetchMetrics(period)}
             disabled={loading}
-            style={{
-              padding: '5px 12px',
-              borderRadius: '7px',
-              border: '1px solid rgba(255,255,255,0.08)',
-              background: 'transparent',
-              color: '#475569',
-              fontSize: '12px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
+            style={{ ...btnBase, cursor: loading ? 'not-allowed' : 'pointer' }}
           >
             {loading ? '...' : '↻'}
           </button>
+          <button
+            onClick={handleRescan}
+            disabled={scanning}
+            style={{
+              ...btnBase,
+              border: scanning ? '1px solid rgba(99,102,241,0.4)' : '1px solid rgba(255,255,255,0.13)',
+              background: scanning ? 'rgba(99,102,241,0.10)' : 'transparent',
+              color: scanning ? '#818cf8' : '#7a8298',
+              cursor: scanning ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {scanning ? '스캔 중...' : '수동 스캔'}
+          </button>
         </div>
       </div>
+
+      {/* 스캔 메시지 */}
+      {scanMsg && (
+        <div style={{
+          padding: '10px 14px',
+          borderRadius: '8px',
+          background: 'rgba(99,102,241,0.06)',
+          border: '1px solid rgba(99,102,241,0.18)',
+          color: '#a5b4fc',
+          fontSize: '12px',
+          fontFamily: "'JetBrains Mono', monospace",
+        }}>
+          {scanMsg}
+        </div>
+      )}
 
       {/* 에러 */}
       {error && (
