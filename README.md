@@ -2,10 +2,8 @@
 <div align="center">
   <img width="945" height="276" alt="main banner" src="https://github.com/user-attachments/assets/8a98bee0-47d2-460d-9ad2-e573e407ef38" />
   <br><br>
-  
-  **자연어 입력 하나로 AWS 인프라를 배포하고, GCP 재해복구(DR) 환경이 자동으로 준비되는 멀티클라우드 자동화 플랫폼**
-  <br>
-  
+  자연어 입력 하나로 AWS 인프라를 배포하고, GCP 재해복구(DR) 환경이 자동으로 준비되는 멀티클라우드 자동화 플랫폼
+  <br><br>
   인프라 구축의 병목, 반복적인 수동 IaC 작성, 방치되는 DR 환경, 그리고 운영 단계의 구성 편위(Drift) 방치라는 실무 문제를 해결하기 위해 <b>CraftOps(지능형 인프라 프로비저닝)</b>, <b>MirrorOps(실시간 재해복구 자동화)</b>, 그리고 <b>CoreOps(운영 거버넌스)</b>를 단일 파이프라인으로 연결한 플랫폼입니다.
 </div>
 
@@ -15,7 +13,7 @@
 
 | 역할 | 이름 | 담당 파트 | 주요 책임 |
 |------|------|-----------|-----------|
-| 팀장 (PM) · 아키텍트 | 김&nbsp;태&nbsp;승 | 기획<br>MirrorOps | 프로젝트 총괄 및 멀티클라우드 아키텍처 설계 · 이벤트 기반 DR 자동화 파이프라인 구축 · AWS-GCP 리소스 매핑 및 페일오버 실행 환경 격리 구현 |
+| 팀장 (PM) · 아키텍트 | 김&nbsp;태&nbsp;승 | 기획<br>MirrorOps | 프로젝트 총괄 및 멀티클라우드 아키텍처 설계 · 아키텍처 토폴로지 작성 · 이벤트 기반 DR 자동화 파이프라인 구축 · AWS-GCP 리소스 매핑 및 페일오버 실행 환경 격리 구현 |
 | 테크 리드 · QA/DevOps | 김&nbsp;영&nbsp;찬 | CraftOps<br>CoreOps | 프론트엔드 전반 및 AI/DAG 기반 인프라 설계 엔진 개발 · 일회성 격리 배포 환경(Runner) 구축 · 통합 운영 거버넌스(Drift 감지 및 모니터링) 구현 |
 
 ---
@@ -55,15 +53,26 @@
 <img src="https://img.shields.io/badge/Amazon_SQS-FF4F8B?style=for-the-badge&logo=amazonsqs&logoColor=white">
 <br><br>
 
-**🔐 Security, Governance & Monitoring**<br>
+**🔐 Security & Auth**<br>
 <img src="https://img.shields.io/badge/Amazon_Cognito-DD344C?style=for-the-badge&logo=amazonaws&logoColor=white">
 <img src="https://img.shields.io/badge/AWS_IAM-DD344C?style=for-the-badge&logo=amazonaws&logoColor=white">
 <img src="https://img.shields.io/badge/Secrets_Manager-DD344C?style=for-the-badge&logo=amazonaws&logoColor=white">
+<br><br>
+
+**🛡️ IaC Validation**<br>
 <img src="https://img.shields.io/badge/tfsec-4A154B?style=for-the-badge&logo=security&logoColor=white">
 <img src="https://img.shields.io/badge/Checkov-157EFB?style=for-the-badge&logo=bridgecrew&logoColor=white">
 <img src="https://img.shields.io/badge/AWS_Config-FF4F8B?style=for-the-badge&logo=amazonaws&logoColor=white">
+<br><br>
+
+**📡 Monitoring & Events**<br>
 <img src="https://img.shields.io/badge/Amazon_EventBridge-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white">
 <img src="https://img.shields.io/badge/CloudWatch-FF4F8B?style=for-the-badge&logo=amazonaws&logoColor=white">
+<br><br>
+
+**🚀 CI/CD & DevOps**<br>
+<img src="https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=github-actions&logoColor=white">
+<img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white">
 
 </div>
 
