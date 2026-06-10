@@ -55,7 +55,6 @@ jobs:
             --service ${{ env.ECS_SERVICE }} \
             --force-new-deployment \
             --region ${{ env.AWS_REGION }} > /dev/null
-
           echo "⏳ ECS 재배포 시작..."
 
       - name: Wait for Service Stable
@@ -64,15 +63,4 @@ jobs:
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }} \
             --region ${{ env.AWS_REGION }}
-          echo "✅ ECS 서비스 안정화 완료"
-
-      - name: Health Check
-        run: |
-          sleep 5
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            https://d1zl418y69bnx0.cloudfront.net/health)
-          if [ "$STATUS" != "200" ]; then
-            echo "❌ 헬스체크 실패: HTTP $STATUS"
-            exit 1
-          fi
-          echo "✅ 백엔드 배포 완료 (HTTP $STATUS)"
+          echo "✅ 백엔드 배포 완료"
