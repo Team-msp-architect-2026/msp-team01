@@ -82,8 +82,8 @@ def generate_hcl(config_snapshot: dict, include_backend: bool = True) -> str:
     rds_version       = rds_preset.get("engine_version", "15")
     allocated_storage = int(data_tier.get("allocated_storage", 20))
 
-    p        = f"{prefix}-{environment}"
-    p_lower  = f"{prefix}-{environment}".lower()
+    p       = f"{prefix}-{environment}".lower()  # 전체 소문자 통일
+    p_lower = p  # 하위 호환성 유지
     # cpu_units는 숫자 타입으로 처리 (문자열 아님)
     cpu_units = int(vcpu * 1024)
 
