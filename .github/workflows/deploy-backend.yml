@@ -1,0 +1,78 @@
+name: Deploy Backend
+
+"on":
+  push:
+    branches: [main, develop]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REGISTRY: 611058323802.dkr.ecr.us-west-2.amazonaws.com
+  ECR_REPOSITORY: autoops-backend
+  ECS_CLUSTER: autoops-cluster
+  ECS_SERVICE: autoops-backend-service
+  ROLE_ARN: arn:aws:iam::611058323802:role/autoops-github-actions-role
+
+jobs:
+  deploy:
+    name: Build & Deploy Backend
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, Tag, Push
+        run: |
+          IMAGE_URI=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          docker buildx build \
+            --platform linux/amd64 \
+            -t $IMAGE_URI:${{ github.sha }} \
+            -t $IMAGE_URI:latest \
+            --push \
+            ./backend/
+          echo "✅ ECR 푸시 완료"
+
+      - name: Force ECS Redeployment
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }} > /dev/null
+
+          echo "⏳ ECS 재배포 시작..."
+
+      - name: Wait for Service Stable
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ ECS 서비스 안정화 완료"
+
+      - name: Health Check
+        run: |
+          sleep 5
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://d1zl418y69bnx0.cloudfront.net/health)
+          if [ "$STATUS" != "200" ]; then
+            echo "❌ 헬스체크 실패: HTTP $STATUS"
+            exit 1
+          fi
+          echo "✅ 백엔드 배포 완료 (HTTP $STATUS)"
