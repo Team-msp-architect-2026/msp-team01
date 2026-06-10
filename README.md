@@ -179,9 +179,6 @@ GitHub Actions 파이프라인 · Docker 플랫폼 주의사항 · 배포 흐름
 ### [📈 Scenario & Testing](https://github.com/Team-msp-architect-2026/msp-team01/wiki/Scenario-and-Testing)
 DR 시나리오 검증 · 페일오버 테스트 · RTO/RPO 측정 결과
  
-### [⚡ Performance Improvement](https://github.com/Team-msp-architect-2026/msp-team01/wiki/Performance-Improvement)
-성능 개선 이력 · 개선 전후 비교 · 측정 결과
- 
 ### [💰 Cost & Policy](https://github.com/Team-msp-architect-2026/msp-team01/wiki/Cost-and-Policy)
 비용 산정 · 야간 중지 정책 · Warm Standby 절감률
  
