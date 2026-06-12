@@ -25,7 +25,7 @@ PERIOD_CONFIG = {
 }
 
 
-def _get_cloudwatch_client(role_arn: str, region: str):
+def _get_cloudwatch_client(role_arn: str, region: str, external_id: str = ""):
     skip = os.getenv("SKIP_ASSUME_ROLE", "false").lower() == "true"
     try:
         sts_client = boto3.client("sts")
@@ -36,11 +36,14 @@ def _get_cloudwatch_client(role_arn: str, region: str):
     except Exception:
         pass
     sts = boto3.client("sts")
-    assumed = sts.assume_role(
-        RoleArn=role_arn,
-        RoleSessionName="autoops-metrics-session",
-        DurationSeconds=900,
-    )
+    assume_kwargs = {
+        "RoleArn": role_arn,
+        "RoleSessionName": "autoops-metrics-session",
+        "DurationSeconds": 900,
+    }
+    if external_id:
+        assume_kwargs["ExternalId"] = external_id
+    assumed = sts.assume_role(**assume_kwargs)
     creds = assumed["Credentials"]
     return boto3.client(
         "cloudwatch",
@@ -288,7 +291,7 @@ async def get_project_metrics(
 
     # ── 6. CloudWatch 배치 호출 ───────────────────────────────────────────────
     try:
-        cw = _get_cloudwatch_client(aws_account.role_arn, project.region)
+        cw = _get_cloudwatch_client(aws_account.role_arn, project.region, str(project.user_id))
         queries = _build_metric_queries(cw_resources, cfg["stat_period"])
 
         if not queries:
