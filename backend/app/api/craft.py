@@ -450,7 +450,12 @@ def deploy(
         )
 
     try:
-        deploy_hcl = HCLGenerator().generate_for_deploy(deployment.config_snapshot)
+        snapshot_with_role = {
+            **deployment.config_snapshot,
+            "role_arn": account.role_arn,
+            "external_id": str(current_user.user_id),
+        }
+        deploy_hcl = HCLGenerator().generate_for_deploy(snapshot_with_role)
         hcl_s3_path = upload_hcl_to_s3(
             project_id=request.project_id,
             deployment_id=deployment.deployment_id,
@@ -555,13 +560,6 @@ def deployment_complete_callback(
             },
         )
         db.commit()
-
-        from app.api.diagram import _generate_diagram_task
-        background_tasks.add_task(
-            _generate_diagram_task,
-            project_id = body.project_id,
-            source     = "craftops_deploy",
-        )
 
         # §7-8 EventBridge 발행
         account = db.query(AWSAccount).filter(
@@ -717,7 +715,12 @@ def deployment_action(
         db.commit()
 
         # [FIX] hcl_s3_path 정의 추가
-        deploy_hcl = HCLGenerator().generate_for_deploy(deployment.config_snapshot)
+        snapshot_with_role = {
+            **deployment.config_snapshot,
+            "role_arn": account.role_arn,
+            "external_id": str(project.user_id),
+        }
+        deploy_hcl = HCLGenerator().generate_for_deploy(snapshot_with_role)
         hcl_s3_path = upload_hcl_to_s3(
             project_id=project_id,
             deployment_id=deployment_id,
@@ -748,7 +751,12 @@ def deployment_action(
         db.commit()
 
         # [FIX] hcl_s3_path 정의 추가
-        deploy_hcl = HCLGenerator().generate_for_deploy(deployment.config_snapshot)
+        snapshot_with_role = {
+            **deployment.config_snapshot,
+            "role_arn": account.role_arn,
+            "external_id": str(project.user_id),
+        }
+        deploy_hcl = HCLGenerator().generate_for_deploy(snapshot_with_role)
         hcl_s3_path = upload_hcl_to_s3(
             project_id=project_id,
             deployment_id=deployment_id,
@@ -938,6 +946,10 @@ def _run_detect_all(project_id: str, role_arn: str, external_id: str, prefix: st
             db.add(baseline)
         db.commit()
         print(f"[CraftOps] Baseline 등록 완료: {len(detected)}개")
+
+        # aws_resources 저장 완료 후 다이어그램 생성
+        from app.api.diagram import _generate_diagram_task
+        _generate_diagram_task(project_id=project_id, source="craftops_deploy")
 
     except Exception as e:
         print(f"[CraftOps] 리소스 감지 실패: {e}")

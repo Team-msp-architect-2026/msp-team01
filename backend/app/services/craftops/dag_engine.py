@@ -380,7 +380,7 @@ class DAGEngine:
         env_presets: dict[str, dict] = {
             "production": {
                 "multi_az":              True,
-                "backup_retention_days": 30,
+                "backup_retention_days": 1,
                 "storage_encrypted":     True,
                 "instance_class":        "db.t3.medium",  # Gemini 없을 때 기본값
             },

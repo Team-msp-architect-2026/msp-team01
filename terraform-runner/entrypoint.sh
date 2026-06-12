@@ -1,18 +1,4 @@
 #!/bin/bash
-# terraform-runner/entrypoint.sh
-# set -e 제거 — 오류 발생 시 콜백 전송 후 종료하기 위해
-
-# ── 환경변수 (ECS Task 실행 시 주입) ───────────────────────────────
-# PROJECT_ID       : AutoOps 프로젝트 ID
-# DEPLOYMENT_ID    : 배포 ID
-# HCL_S3_PATH      : main.tf가 저장된 S3 경로
-# ROLE_ARN         : 사용자 AWS 계정 Cross-Account IAM Role ARN
-# REGION           : 사용자 인프라 배포 리전
-# ACTION           : apply | destroy
-# EXTERNAL_ID      : AssumeRole ExternalId (user_id)
-# BACKEND_API_URL  : 백엔드 ALB URL (콜백용)
-# INTERNAL_SECRET  : 내부 API 시크릿
-# AWS_DEFAULT_REGION=us-west-2 (AutoOps 플랫폼 리전)
 
 echo "[AutoOps Runner] 시작: DEPLOYMENT_ID=${DEPLOYMENT_ID}, ACTION=${ACTION}"
 
@@ -52,33 +38,28 @@ echo "[AutoOps Runner] main.tf 다운로드 완료: ${HCL_S3_PATH}"
 
 cd /workspace/tf
 
-# ── Cross-Account Role Assume ───────────────────────────────────────
-CREDS=$(aws sts assume-role \
+# ── Cross-Account Role Assume 검증 (자격증명 교체 없음) ─────────────
+# provider 블록의 assume_role이 terraform apply 시점에 처리
+# backend(S3/DynamoDB)는 AutoOpsTaskRole 자격증명 그대로 사용
+aws sts assume-role \
   --role-arn "${ROLE_ARN}" \
-  --role-session-name "autoops-deploy-${DEPLOYMENT_ID}" \
+  --role-session-name "autoops-verify-${DEPLOYMENT_ID}" \
   --external-id "${EXTERNAL_ID}" \
-  --duration-seconds 3600 \
-  --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-  --output text)
-
+  --duration-seconds 900 \
+  > /dev/null
 if [ $? -ne 0 ]; then
-  echo "[AutoOps Runner] Cross-Account Role Assume 실패"
+  echo "[AutoOps Runner] Cross-Account Role Assume 검증 실패"
   send_callback "failed" "IAM Role Assume 실패: ${ROLE_ARN}"
   exit 1
 fi
-
-export AWS_ACCESS_KEY_ID=$(echo $CREDS | awk '{print $1}')
-export AWS_SECRET_ACCESS_KEY=$(echo $CREDS | awk '{print $2}')
-export AWS_SESSION_TOKEN=$(echo $CREDS | awk '{print $3}')
-export AWS_DEFAULT_REGION="${REGION}"
-
 echo "[AutoOps Runner] Cross-Account Role Assume 완료"
 
 # ── terraform init ──────────────────────────────────────────────────
+# 이 시점 자격증명 = AutoOpsTaskRole (플랫폼 계정)
+# → S3/DynamoDB backend 접근 정상
 terraform init -input=false
 if [ $? -ne 0 ]; then
   echo "[AutoOps Runner] terraform init 실패"
-  # apply 실패 → partial_failed / destroy 실패 → destroy_failed
   if [ "${ACTION}" = "destroy" ]; then
     send_callback "destroy_failed" "terraform init 실패 (destroy)"
   else
@@ -89,6 +70,8 @@ fi
 echo "[AutoOps Runner] terraform init 완료"
 
 # ── terraform apply 또는 destroy ────────────────────────────────────
+# provider 블록의 assume_role이 사용자 계정으로 전환
+# → 리소스 생성/삭제는 사용자 계정에서 실행
 if [ "${ACTION}" = "destroy" ]; then
   terraform destroy -auto-approve -input=false
   TF_EXIT=$?
