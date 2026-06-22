@@ -301,7 +301,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="CPU 사용률" subtitle="%" isEmpty={!data.metrics.ecs?.cpu?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <AreaChart data={toChartData(data.metrics.ecs!.cpu, period, 'v')}>
+                <AreaChart data={toChartData(data.metrics.ecs?.cpu ?? [], period, 'v')}>
                   <defs>
                     <linearGradient id="gc1" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor={C.cpu} stopOpacity={0.25} />
@@ -319,7 +319,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="Memory 사용률" subtitle="%" isEmpty={!data.metrics.ecs?.memory?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <AreaChart data={toChartData(data.metrics.ecs!.memory, period, 'v')}>
+                <AreaChart data={toChartData(data.metrics.ecs?.memory ?? [], period, 'v')}>
                   <defs>
                     <linearGradient id="gc2" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor={C.memory} stopOpacity={0.25} />
@@ -346,7 +346,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="요청 수" subtitle="건/구간" isEmpty={!data.metrics.alb?.request_count?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <LineChart data={toChartData(data.metrics.alb!.request_count, period, 'v')}>
+                <LineChart data={toChartData(data.metrics.alb?.request_count ?? [], period, 'v')}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                   <XAxis dataKey="time" tick={{ fill: '#334155', fontSize: 10 }} />
                   <YAxis tick={{ fill: '#334155', fontSize: 10 }} />
@@ -358,7 +358,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="응답 시간" subtitle="ms" isEmpty={!data.metrics.alb?.response_time?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <LineChart data={toChartData(data.metrics.alb!.response_time, period, 'v')}>
+                <LineChart data={toChartData(data.metrics.alb?.response_time ?? [], period, 'v')}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                   <XAxis dataKey="time" tick={{ fill: '#334155', fontSize: 10 }} />
                   <YAxis tick={{ fill: '#334155', fontSize: 10 }} />
@@ -370,7 +370,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="5xx 에러" subtitle="건/구간" isEmpty={!data.metrics.alb?.error_5xx?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <LineChart data={toChartData(data.metrics.alb!.error_5xx, period, 'v')}>
+                <LineChart data={toChartData(data.metrics.alb?.error_5xx ?? [], period, 'v')}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                   <XAxis dataKey="time" tick={{ fill: '#334155', fontSize: 10 }} />
                   <YAxis tick={{ fill: '#334155', fontSize: 10 }} />
@@ -391,7 +391,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="CPU 사용률" subtitle="%" isEmpty={!data.metrics.rds?.cpu?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <AreaChart data={toChartData(data.metrics.rds!.cpu, period, 'v')}>
+                <AreaChart data={toChartData(data.metrics.rds?.cpu ?? [], period, 'v')}>
                   <defs>
                     <linearGradient id="gc3" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor={C.cpu} stopOpacity={0.25} />
@@ -409,7 +409,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="DB 커넥션" subtitle="개" isEmpty={!data.metrics.rds?.connections?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <LineChart data={toChartData(data.metrics.rds!.connections, period, 'v')}>
+                <LineChart data={toChartData(data.metrics.rds?.connections ?? [], period, 'v')}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                   <XAxis dataKey="time" tick={{ fill: '#334155', fontSize: 10 }} />
                   <YAxis tick={{ fill: '#334155', fontSize: 10 }} />
@@ -421,7 +421,7 @@ export default function InfraMetrics({ projectId }: Props) {
 
             <MetricPanel title="여유 스토리지" subtitle="GB" isEmpty={!data.metrics.rds?.storage_free_gb?.length}>
               <ResponsiveContainer width="100%" height={150}>
-                <AreaChart data={toChartData(data.metrics.rds!.storage_free_gb, period, 'v')}>
+                <AreaChart data={toChartData(data.metrics.rds?.storage_free_gb ?? [], period, 'v')}>
                   <defs>
                     <linearGradient id="gc4" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor={C.storage} stopOpacity={0.25} />

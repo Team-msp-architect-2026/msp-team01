@@ -1,8 +1,8 @@
 // frontend/app/onboarding/page.tsx
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useState, useEffect } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { apiClient } from '@/lib/api'
 
 type ScanStatus = 'idle' | 'scanning' | 'pending_confirm' | 'confirming' | 'completed' | 'failed'
@@ -15,7 +15,16 @@ interface ScanGroup {
 }
 
 export default function OnboardingPage() {
+  return (
+    <Suspense fallback={null}>
+      <OnboardingPageInner />
+    </Suspense>
+  )
+}
+
+function OnboardingPageInner() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [accountId, setAccountId]   = useState<string>('')
   const [scanId, setScanId]         = useState<string>('')
   const [projectId, setProjectId]   = useState<string>('')
@@ -28,9 +37,14 @@ export default function OnboardingPage() {
   useEffect(() => {
     apiClient.get('/api/accounts').then(res => {
       const accounts = res.data.data
-      if (accounts.length > 0) setAccountId(accounts[0].account_id)
+      const fromQuery = searchParams.get('accountId')
+      if (fromQuery && accounts.some((a: any) => a.account_id === fromQuery)) {
+        setAccountId(fromQuery)
+      } else if (accounts.length > 0) {
+        setAccountId(accounts[0].account_id)
+      }
     })
-  }, [])
+  }, [searchParams])
 
   const handleStartScan = async () => {
     if (!accountId) return
@@ -74,7 +88,7 @@ export default function OnboardingPage() {
       })
       setStatus('completed')
       // ⚠️ v3 변경: 거버넌스 통합 허브로 리다이렉트
-      setTimeout(() => router.push(`/projects/${projectId}`), 1500)
+      setTimeout(() => router.push('/dashboard'), 1500)
     } catch (e: any) {
       setStatus('failed')
       setError(e.response?.data?.detail?.message || '확정 실패')

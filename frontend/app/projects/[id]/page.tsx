@@ -35,6 +35,7 @@ interface AuditLog {
 
 interface ProjectInfo {
   project_id:     string
+  account_id:     string
   name:           string
   prefix:         string
   environment:    string
@@ -238,6 +239,13 @@ export default function GovernancePage() {
                 <path d="M8.5 5H10V3.5C10 2.67 9.33 2 8.5 2S7 2.67 7 3.5 7.67 5 8.5 5z"/>
               </svg>
               Slack 연동
+            </button>
+            <button className="gv-btn" onClick={() => router.push(`/onboarding?accountId=${project.account_id}`)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                <path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/>
+              </svg>
+              온보딩 스캔
             </button>
             <button className="gv-btn" onClick={() => router.push(`/projects/${projectId}/mirror`)}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">

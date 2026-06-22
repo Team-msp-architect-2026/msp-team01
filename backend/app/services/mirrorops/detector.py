@@ -1,9 +1,23 @@
 import boto3
 import json
-from typing import Any
 from sqlalchemy.orm import Session
 from app.models.aws_resource import AWSResource
-from datetime import datetime
+from datetime import datetime, date
+
+
+def _serialize_config(obj):
+    """boto3 응답의 datetime을 문자열로 변환"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
+
+
+def _clean_config(config: dict) -> dict:
+    """config_json 직렬화 가능하도록 변환"""
+    try:
+        return json.loads(json.dumps(config, default=_serialize_config))
+    except Exception:
+        return {}
 
 
 RESOURCE_TYPE_MAP: dict[str, dict] = {
@@ -30,10 +44,78 @@ RESOURCE_TYPE_MAP: dict[str, dict] = {
 }
 
 
+def _extract_name(resource_type: str, item: dict) -> str:
+    """리소스 타입별 Name 태그 또는 식별자 추출"""
+    # Tags에서 Name 추출 (EC2 계열)
+    tags = item.get("Tags", item.get("tags", []))
+    if isinstance(tags, list):
+        for tag in tags:
+            if tag.get("Key", tag.get("key", "")) == "Name":
+                return tag.get("Value", tag.get("value", ""))
+    elif isinstance(tags, dict):
+        name = tags.get("Name", "")
+        if name:
+            return name
+
+    # name 필드 직접 사용 (ECS Service/TaskDefinition 수동 구성)
+    if item.get("name"):
+        return item["name"]
+
+    # 리소스별 이름 필드 (버그 3 수정: GroupName 추가)
+    return (
+        item.get("GroupName") or          # ← v2 추가: SecurityGroup 이름 필드
+        item.get("clusterName") or
+        item.get("logGroupName") or
+        item.get("DBSubnetGroupName") or
+        item.get("DBInstanceIdentifier") or
+        item.get("RoleName") or
+        item.get("LoadBalancerName") or
+        item.get("TargetGroupName") or
+        ""
+    )
+
+
+def _extract_id(resource_type: str, item: dict) -> str:
+    """리소스 타입별 ID 추출 — resource_type 기반으로 정확히 매핑"""
+    id_map = {
+        "AWS::EC2::VPC":                                  "VpcId",
+        "AWS::EC2::Subnet":                               "SubnetId",
+        "AWS::EC2::InternetGateway":                      "InternetGatewayId",
+        "AWS::EC2::NatGateway":                           "NatGatewayId",
+        "AWS::EC2::RouteTable":                           "RouteTableId",
+        "AWS::EC2::SecurityGroup":                        "GroupId",
+        "AWS::ElasticLoadBalancingV2::LoadBalancer":      "LoadBalancerArn",
+        "AWS::ElasticLoadBalancingV2::TargetGroup":       "TargetGroupArn",
+        "AWS::IAM::Role":                                 "RoleName",
+        "AWS::ECS::Cluster":                              "clusterArn",
+        "AWS::ECS::TaskDefinition":                       "taskDefinitionArn",
+        "AWS::ECS::Service":                              "serviceArn",
+        "AWS::Logs::LogGroup":                            "logGroupName",
+        "AWS::RDS::DBSubnetGroup":                        "DBSubnetGroupName",
+        "AWS::RDS::DBInstance":                           "DBInstanceIdentifier",
+        "AWS::KMS::Key":                                  "KeyId",
+    }
+    field = id_map.get(resource_type)
+    if field:
+        return item.get(field, "")
+    return ""
+
+
+def _matches_prefix(resource_type: str, name: str, name_prefix: str) -> bool:
+    """리소스 타입별 prefix 매칭"""
+    name_lower   = name.lower()
+    prefix_lower = name_prefix.lower()
+    # Log Group: "/ecs/test-prod-app" → prefix가 포함되면 매칭
+    if resource_type == "AWS::Logs::LogGroup":
+        return prefix_lower.rstrip("-") in name_lower
+    return name_lower.startswith(prefix_lower)
+
+
 class ResourceDetector:
     """
-    AWS Config + boto3를 활용해 배포된 16개 리소스를 감지하고 정규화한다. (FR-B-003)
+    boto3 직접 호출로 배포된 리소스를 감지하고 정규화한다. (FR-B-003)
     Cross-Account IAM Role Assume 후 사용자 계정의 리소스를 조회한다.
+    AWS Config 의존 제거 → 배포 완료 즉시 스캔 가능.
     """
 
     def __init__(self, role_arn: str, region: str, external_id: str = ""):
@@ -102,67 +184,229 @@ class ResourceDetector:
     def _query_resources(
         self, resource_type: str, name_prefix: str
     ) -> list[dict]:
-        config_client = self.session.client("config", region_name=self.region)
-        results  = []
-        seen_ids: set = set()
+        """
+        RESOURCE_TYPE_MAP 기반 boto3 직접 호출.
+        AWS Config 의존 없이 즉시 리소스 조회 가능.
+        버그 4 수정: IAM/ELB/Logs/RDS 페이지네이션 추가
+        """
+        type_config = RESOURCE_TYPE_MAP.get(resource_type, {})
+        service = type_config.get("service")
+        method  = type_config.get("method")
+        key     = type_config.get("key")
 
-        paginator = config_client.get_paginator("list_discovered_resources")
-        for page in paginator.paginate(resourceType=resource_type):
-            for item in page.get("resourceIdentifiers", []):
-                res_name = item.get("resourceName", "")
-                res_id   = item.get("resourceId", "")
+        if not service or not method:
+            return []
 
-                if res_id in seen_ids:
-                    continue
-                seen_ids.add(res_id)
+        client = self.session.client(service, region_name=self.region)
+        results = []
 
-                detail = config_client.get_resource_config_history(
-                    resourceType=resource_type,
-                    resourceId=res_id,
-                    limit=1,
-                )
-                config_items = detail.get("configurationItems", [])
-                config_json  = {}
+        try:
+            # ── 서비스별 특수 처리 (페이지네이션 포함) ──────────────────
+            if resource_type == "AWS::ECS::Cluster":
+                arns = client.list_clusters().get("clusterArns", [])
+                if not arns:
+                    return []
+                items = client.describe_clusters(clusters=arns).get("clusters", [])
 
-                if config_items:
-                    item_status = config_items[0].get("configurationItemStatus", "")
-                    if item_status == "ResourceDeleted":
-                        continue
+            elif resource_type == "AWS::ECS::TaskDefinition":
+                arns = client.list_task_definitions(status="ACTIVE").get("taskDefinitionArns", [])
+                items = [{"taskDefinitionArn": arn, "name": arn.split("/")[-1].split(":")[0]} for arn in arns]
 
-                    raw = config_items[0].get("configuration", "{}")
+            elif resource_type == "AWS::ECS::Service":
+                cluster_arns = client.list_clusters().get("clusterArns", [])
+                items = []
+                for cluster in cluster_arns:
+                    arns = client.list_services(cluster=cluster).get("serviceArns", [])
+                    items.extend([{"serviceArn": arn, "name": arn.split("/")[-1]} for arn in arns])
+
+            elif resource_type == "AWS::IAM::Role":
+                # ← 버그 4 수정: IAM 페이지네이션
+                items = []
+                paginator = client.get_paginator("list_roles")
+                for page in paginator.paginate():
+                    items.extend(page.get("Roles", []))
+
+            elif resource_type == "AWS::KMS::Key":
+                keys = client.list_keys().get("Keys", [])
+                items = []
+                for k in keys:
                     try:
-                        config_json = json.loads(raw) if isinstance(raw, str) else raw
-                    except json.JSONDecodeError:
-                        config_json = {}
+                        meta = client.describe_key(KeyId=k["KeyId"])["KeyMetadata"]
+                        if meta.get("KeyState") == "Enabled" and meta.get("KeyManager") == "CUSTOMER":
+                            items.append(meta)
+                    except Exception:
+                        pass
 
-                    top_tags = config_items[0].get("tags", {})
-                    config_json["tags"] = top_tags
+            elif resource_type == "AWS::EC2::NatGateway":
+                items = client.describe_nat_gateways(
+                    Filters=[{"Name": "state", "Values": ["available"]}]
+                ).get("NatGateways", [])
 
-                name_tag = ""
-                tags = config_json.get("tags", {})
-                if isinstance(tags, dict):
-                    name_tag = tags.get("Name", "")
-                elif isinstance(tags, list):
-                    for tag in tags:
-                        if tag.get("key") == "Name":
-                            name_tag = tag.get("value", "")
-                            break
+            elif resource_type == "AWS::ElasticLoadBalancingV2::LoadBalancer":
+                # ← 버그 4 수정: ELB 페이지네이션
+                items = []
+                paginator = client.get_paginator("describe_load_balancers")
+                for page in paginator.paginate():
+                    items.extend(page.get("LoadBalancers", []))
 
-                effective_name = name_tag or res_name
-                if not effective_name.lower().startswith(name_prefix.lower()):
+            elif resource_type == "AWS::ElasticLoadBalancingV2::TargetGroup":
+                # ← 버그 4 수정: TargetGroup 페이지네이션
+                items = []
+                paginator = client.get_paginator("describe_target_groups")
+                for page in paginator.paginate():
+                    items.extend(page.get("TargetGroups", []))
+
+            elif resource_type == "AWS::Logs::LogGroup":
+                # ← 버그 4 수정: LogGroup 페이지네이션
+                items = []
+                paginator = client.get_paginator("describe_log_groups")
+                for page in paginator.paginate():
+                    items.extend(page.get("logGroups", []))
+
+            elif resource_type == "AWS::RDS::DBInstance":
+                # ← 버그 4 수정: RDS 페이지네이션
+                items = []
+                paginator = client.get_paginator("describe_db_instances")
+                for page in paginator.paginate():
+                    items.extend(page.get("DBInstances", []))
+
+            elif resource_type == "AWS::RDS::DBSubnetGroup":
+                # ← 버그 4 수정: RDS SubnetGroup 페이지네이션
+                items = []
+                paginator = client.get_paginator("describe_db_subnet_groups")
+                for page in paginator.paginate():
+                    items.extend(page.get("DBSubnetGroups", []))
+
+            else:
+                response = getattr(client, method)()
+                items = response.get(key, [])
+
+            # ── 이름/ID 추출 + prefix 필터링 ────────────────────────────
+            for item in items:
+                name        = _extract_name(resource_type, item)
+                resource_id = _extract_id(resource_type, item)
+
+                if not resource_id:
+                    continue
+
+                if not name:
+                    name = resource_id
+
+                if not _matches_prefix(resource_type, name, name_prefix):
                     continue
 
                 results.append({
-                    "id":     res_id,
-                    "name":   effective_name,
-                    "config": config_json,
+                    "id":     resource_id,
+                    "name":   name,
+                    "config": _clean_config(item),
                 })
+
+        except Exception as e:
+            print(f"[경고] {resource_type} boto3 직접 조회 실패: {e}")
 
         return results
 
-    def scan_all(self, role_arn: str, region: str = "us-west-2", external_id: str = "") -> dict:
-        import boto3
+    def _enabled_regions(self, session: boto3.Session) -> list[str]:
+        """계정에서 활성화된(opt-in 제외) 전체 리전 목록 조회"""
+        ec2 = session.client("ec2", region_name="us-west-2")
+        try:
+            regions = ec2.describe_regions(
+                Filters=[{"Name": "opt-in-status", "Values": ["opt-in-not-required", "opted-in"]}]
+            )["Regions"]
+            return [r["RegionName"] for r in regions]
+        except Exception as e:
+            print(f"[scan_all] 리전 목록 조회 실패, us-west-2만 스캔: {e}")
+            return ["us-west-2"]
 
+    def _scan_region(self, session: boto3.Session, region: str) -> list[dict]:
+        """단일 리전 내 EC2/ECS/RDS/ALB/Logs 리소스 스캔"""
+        ec2   = session.client("ec2",   region_name=region)
+        ecs   = session.client("ecs",   region_name=region)
+        rds   = session.client("rds",   region_name=region)
+        elbv2 = session.client("elbv2", region_name=region)
+        logs  = session.client("logs",  region_name=region)
+
+        all_resources = []
+
+        # ── EC2 ──────────────────────────────────────────────────────
+        try:
+            for vpc in ec2.describe_vpcs()["Vpcs"]:
+                if vpc.get("IsDefault"): continue
+                name = next((t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"), vpc["VpcId"])
+                all_resources.append({"resource_type": "AWS::EC2::VPC", "resource_id": vpc["VpcId"], "resource_name": name, "region": region, "vpc_id": vpc["VpcId"]})
+        except Exception as e:
+            print(f"[scan_all] {region} VPC 조회 실패: {e}")
+
+        try:
+            for sn in ec2.describe_subnets()["Subnets"]:
+                if sn.get("DefaultForAz"): continue
+                name = next((t["Value"] for t in sn.get("Tags", []) if t["Key"] == "Name"), sn["SubnetId"])
+                all_resources.append({"resource_type": "AWS::EC2::Subnet", "resource_id": sn["SubnetId"], "resource_name": name, "region": region, "vpc_id": sn.get("VpcId")})
+        except Exception as e:
+            print(f"[scan_all] {region} Subnet 조회 실패: {e}")
+
+        try:
+            for sg in ec2.describe_security_groups()["SecurityGroups"]:
+                if sg.get("GroupName") == "default": continue
+                name = next((t["Value"] for t in sg.get("Tags", []) if t["Key"] == "Name"), sg.get("GroupName", sg["GroupId"]))
+                all_resources.append({"resource_type": "AWS::EC2::SecurityGroup", "resource_id": sg["GroupId"], "resource_name": name, "region": region, "vpc_id": sg.get("VpcId")})
+        except Exception as e:
+            print(f"[scan_all] {region} SecurityGroup 조회 실패: {e}")
+
+        # ── ECS ──────────────────────────────────────────────────────
+        try:
+            cluster_arns = ecs.list_clusters().get("clusterArns", [])
+            if cluster_arns:
+                for c in ecs.describe_clusters(clusters=cluster_arns).get("clusters", []):
+                    all_resources.append({"resource_type": "AWS::ECS::Cluster", "resource_id": c["clusterArn"], "resource_name": c["clusterName"], "region": region, "vpc_id": None})
+        except Exception as e:
+            print(f"[scan_all] {region} ECS Cluster 조회 실패: {e}")
+
+        # ── RDS ──────────────────────────────────────────────────────
+        try:
+            paginator = rds.get_paginator("describe_db_instances")
+            for page in paginator.paginate():
+                for db in page.get("DBInstances", []):
+                    all_resources.append({"resource_type": "AWS::RDS::DBInstance", "resource_id": db["DBInstanceIdentifier"], "resource_name": db["DBInstanceIdentifier"], "region": region, "vpc_id": None})
+        except Exception as e:
+            print(f"[scan_all] {region} RDS 조회 실패: {e}")
+
+        # ── ALB ──────────────────────────────────────────────────────
+        try:
+            paginator = elbv2.get_paginator("describe_load_balancers")
+            for page in paginator.paginate():
+                for lb in page.get("LoadBalancers", []):
+                    all_resources.append({"resource_type": "AWS::ElasticLoadBalancingV2::LoadBalancer", "resource_id": lb["LoadBalancerArn"], "resource_name": lb["LoadBalancerName"], "region": region, "vpc_id": lb.get("VpcId")})
+        except Exception as e:
+            print(f"[scan_all] {region} ALB 조회 실패: {e}")
+
+        # ── NAT Gateway ───────────────────────────────────────────────
+        try:
+            for nat in ec2.describe_nat_gateways(Filters=[{"Name": "state", "Values": ["available"]}])["NatGateways"]:
+                name = next((t["Value"] for t in nat.get("Tags", []) if t["Key"] == "Name"), nat["NatGatewayId"])
+                all_resources.append({"resource_type": "AWS::EC2::NatGateway", "resource_id": nat["NatGatewayId"], "resource_name": name, "region": region, "vpc_id": nat.get("VpcId")})
+        except Exception as e:
+            print(f"[scan_all] {region} NAT Gateway 조회 실패: {e}")
+
+        # ── Log Groups ───────────────────────────────────────────────
+        try:
+            paginator = logs.get_paginator("describe_log_groups")
+            for page in paginator.paginate():
+                for lg in page.get("logGroups", []):
+                    all_resources.append({"resource_type": "AWS::Logs::LogGroup", "resource_id": lg["logGroupName"], "resource_name": lg["logGroupName"], "region": region, "vpc_id": None})
+        except Exception as e:
+            print(f"[scan_all] {region} LogGroup 조회 실패: {e}")
+
+        return all_resources
+
+    def scan_all(self, role_arn: str, region: str = "", external_id: str = "") -> dict:
+        """
+        온보딩용 전체 계정 리소스 스캔.
+        버그 1 수정: AWS Config 의존 제거 → boto3 직접 호출로 전환.
+        Config 초기 탐색 지연(수십 분) 없이 즉시 스캔 가능.
+        멀티 리전: 계정에 활성화된 전체 리전을 순회 (IAM Role은 글로벌이라 1회만 조회).
+        region을 명시하면 해당 리전만 스캔(테스트/디버그용, 기존 동작 유지).
+        """
         sts = boto3.client("sts")
         kwargs = {
             "RoleArn":         role_arn,
@@ -178,64 +422,26 @@ class ResourceDetector:
             aws_access_key_id=creds["AccessKeyId"],
             aws_secret_access_key=creds["SecretAccessKey"],
             aws_session_token=creds["SessionToken"],
-            region_name=region,
         )
 
-        config_client = session.client("config")
-        ec2_client    = session.client("ec2")
-
-        resource_types = [
-            "AWS::EC2::VPC",
-            "AWS::EC2::Subnet",
-            "AWS::EC2::SecurityGroup",
-            "AWS::ECS::Cluster",
-            "AWS::RDS::DBInstance",
-            "AWS::ElasticLoadBalancingV2::LoadBalancer",
-            "AWS::EC2::NatGateway",
-            "AWS::IAM::Role",
-            "AWS::S3::Bucket",
-            "AWS::Logs::LogGroup",
-        ]
+        regions = [region] if region else self._enabled_regions(session)
 
         all_resources = []
-        for resource_type in resource_types:
-            paginator = config_client.get_paginator("list_discovered_resources")
-            for page in paginator.paginate(resourceType=resource_type):
-                for r in page.get("resourceIdentifiers", []):
-                    all_resources.append({
-                        "resource_type": resource_type,
-                        "resource_id":   r["resourceId"],
-                        "resource_name": r.get("resourceName", r["resourceId"]),
-                        "region":        r.get("resourceRegion", region),
-                    })
+        for r in regions:
+            all_resources.extend(self._scan_region(session, r))
 
-        vpc_names = {}
+        # ── IAM Role (글로벌, 1회만 조회) ───────────────────────────────
         try:
-            vpcs = ec2_client.describe_vpcs()["Vpcs"]
-            for vpc in vpcs:
-                name = next(
-                    (t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"),
-                    vpc["VpcId"],
-                )
-                vpc_names[vpc["VpcId"]] = name
-        except Exception:
-            pass
+            iam = session.client("iam", region_name="us-west-2")
+            paginator = iam.get_paginator("list_roles")
+            for page in paginator.paginate():
+                for role in page.get("Roles", []):
+                    all_resources.append({"resource_type": "AWS::IAM::Role", "resource_id": role["RoleName"], "resource_name": role["RoleName"], "region": "global", "vpc_id": None})
+        except Exception as e:
+            print(f"[scan_all] IAM Role 조회 실패: {e}")
 
-        subnet_vpc_map = {}
-        try:
-            subnets = ec2_client.describe_subnets()["Subnets"]
-            for s in subnets:
-                subnet_vpc_map[s["SubnetId"]] = s["VpcId"]
-        except Exception:
-            pass
-
-        sg_vpc_map = {}
-        try:
-            sgs = ec2_client.describe_security_groups()["SecurityGroups"]
-            for sg in sgs:
-                sg_vpc_map[sg["GroupId"]] = sg.get("VpcId", "")
-        except Exception:
-            pass
+        # ── VPC 기반 그룹화 ───────────────────────────────────────────
+        vpc_names = {r["resource_id"]: r["resource_name"] for r in all_resources if r["resource_type"] == "AWS::EC2::VPC"}
 
         groups: dict = {}
 
@@ -251,16 +457,6 @@ class ResourceDetector:
             groups[key]["resources"].append(resource)
 
         for r in all_resources:
-            rtype = r["resource_type"]
-            rid   = r["resource_id"]
-
-            if rtype == "AWS::EC2::VPC":
-                _add_to_group(r, rid)
-            elif rtype == "AWS::EC2::Subnet":
-                _add_to_group(r, subnet_vpc_map.get(rid))
-            elif rtype == "AWS::EC2::SecurityGroup":
-                _add_to_group(r, sg_vpc_map.get(rid))
-            else:
-                _add_to_group(r, None)
+            _add_to_group(r, r.get("vpc_id"))
 
         return groups

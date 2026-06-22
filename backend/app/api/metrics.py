@@ -13,6 +13,7 @@ from app.core.auth import get_current_user
 from app.models.project import Project
 from app.models.aws_account import AWSAccount
 from app.models.aws_resource import AWSResource
+from app.models.governance import ResourceBaseline, OnboardingScan
 
 router = APIRouter()
 
@@ -223,7 +224,15 @@ async def get_project_metrics(
     ).first()
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
-    if project.status != "completed":
+
+    is_onboarding_ready = (
+        project.source == "onboarding"
+        and db.query(OnboardingScan).filter(
+            OnboardingScan.project_id == project_id,
+            OnboardingScan.status == "completed",
+        ).first() is not None
+    )
+    if project.status != "completed" and not is_onboarding_ready:
         raise HTTPException(status_code=400, detail="배포 완료된 프로젝트만 모니터링 가능합니다.")
 
     # ── 2. AWS 계정 → role_arn 조회 ───────────────────────────────────────────
@@ -233,12 +242,26 @@ async def get_project_metrics(
     if not aws_account:
         raise HTTPException(status_code=404, detail="연동된 AWS 계정을 찾을 수 없습니다.")
 
-    # ── 3. aws_resources 테이블에서 리소스 조회 ───────────────────────────────
-    aws_res_list = db.query(AWSResource).filter(
-        AWSResource.project_id == project_id,
-    ).all()
+    # ── 3. 리소스 조회 (craftops_deploy → aws_resources / onboarding → resource_baselines) ──
+    normalized: list[dict] = [
+        {
+            "resource_type":   r.resource_type,
+            "resource_name":   r.resource_name,
+            "resource_id_aws": r.resource_id_aws,
+            "region":          project.region,
+        }
+        for r in db.query(AWSResource).filter(AWSResource.project_id == project_id).all()
+    ]
+    for b in db.query(ResourceBaseline).filter(ResourceBaseline.project_id == project_id).all():
+        cfg = b.baseline_config or {}
+        normalized.append({
+            "resource_type":   b.resource_type,
+            "resource_name":   cfg.get("resource_name", ""),
+            "resource_id_aws": b.resource_id_aws,
+            "region":          cfg.get("region", project.region),
+        })
 
-    if not aws_res_list:
+    if not normalized:
         return {
             "project_id": project_id,
             "period": period,
@@ -249,8 +272,8 @@ async def get_project_metrics(
         }
 
     def find_res(keywords: list):
-        for r in aws_res_list:
-            rt = r.resource_type.lower()
+        for r in normalized:
+            rt = r["resource_type"].lower()
             if all(k in rt for k in keywords):
                 return r
         return None
@@ -260,19 +283,12 @@ async def get_project_metrics(
     alb_res         = find_res(["loadbalancer"]) or find_res(["elasticloadbalancing"])
     rds_res = find_res(["rds", "dbinstance"]) or find_res(["rds::dbinstance"])
 
-    # ── 4. 리소스 식별자 정리 ─────────────────────────────────────────────────
-    ecs_cluster_name = ecs_cluster_res.resource_name.lower() if ecs_cluster_res else None
-    ecs_service_name = ecs_service_res.resource_name.lower() if ecs_service_res else None
-    alb_arn          = alb_res.resource_id_aws        if alb_res         else None
-    rds_identifier   = rds_res.resource_name.lower() if rds_res         else None
+    # ── 4. 리소스 식별자 정리 (리소스별 자체 region 사용 — 온보딩은 리전이 섞일 수 있음) ──
+    ecs_cluster_name = ecs_cluster_res["resource_name"].lower() if ecs_cluster_res else None
+    ecs_service_name = ecs_service_res["resource_name"].lower() if ecs_service_res else None
+    alb_arn          = alb_res["resource_id_aws"]        if alb_res         else None
+    rds_identifier   = rds_res["resource_name"].lower() if rds_res         else None
     alb_dimension    = _extract_alb_dimension(alb_arn) if alb_arn        else None
-
-    cw_resources = {
-        "ecs_cluster":    ecs_cluster_name,
-        "ecs_service":    ecs_service_name,
-        "alb_dimension":  alb_dimension,
-        "rds_identifier": rds_identifier,
-    }
 
     if not any([ecs_cluster_name, ecs_service_name, alb_dimension, rds_identifier]):
         return {
@@ -284,70 +300,82 @@ async def get_project_metrics(
             "message": "모니터링 가능한 리소스가 없습니다.",
         }
 
-    # ── 5. 기간 설정 ──────────────────────────────────────────────────────────
+    # ── 5. 리전별로 그룹화 (리소스마다 region이 다를 수 있음) ────────────────────
+    region_groups: dict[str, dict] = {}
+
+    def _assign(region: str, key: str, value):
+        region_groups.setdefault(region, {})[key] = value
+
+    if ecs_cluster_name and ecs_service_name:
+        _assign(ecs_cluster_res["region"], "ecs_cluster", ecs_cluster_name)
+        _assign(ecs_cluster_res["region"], "ecs_service", ecs_service_name)
+    if alb_dimension:
+        _assign(alb_res["region"], "alb_dimension", alb_dimension)
+    if rds_identifier:
+        _assign(rds_res["region"], "rds_identifier", rds_identifier)
+
+    # ── 6. 기간 설정 ──────────────────────────────────────────────────────────
     cfg = PERIOD_CONFIG[period]
     now = datetime.now(timezone.utc)
     start_time = now - timedelta(seconds=cfg["lookback_seconds"])
 
-    # ── 6. CloudWatch 배치 호출 ───────────────────────────────────────────────
-    try:
-        cw = _get_cloudwatch_client(aws_account.role_arn, project.region, str(project.user_id))
-        queries = _build_metric_queries(cw_resources, cfg["stat_period"])
-
-        if not queries:
-            return {
-                "project_id": project_id,
-                "period": period,
-                "region": project.region,
-                "resources": cw_resources,
-                "metrics": {},
-            }
-
-        response = cw.get_metric_data(
-            MetricDataQueries=queries,
-            StartTime=start_time,
-            EndTime=now,
-        )
-        results = response.get("MetricDataResults", [])
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"CloudWatch 조회 실패: {str(e)}",
-        )
-
-    # ── 7. 응답 구성 ──────────────────────────────────────────────────────────
+    # ── 7. 리전별 CloudWatch 배치 호출 ────────────────────────────────────────
+    cw_resources = {"ecs_cluster": None, "ecs_service": None, "alb_dimension": None, "rds_identifier": None}
     metrics = {}
 
-    if ecs_cluster_name and ecs_service_name:
-        metrics["ecs"] = {
-            "cpu":    _parse_metric_result(results, "ecs_cpu"),
-            "memory": _parse_metric_result(results, "ecs_memory"),
-        }
+    for region, group in region_groups.items():
+        cw_resources.update(group)
+        queries = _build_metric_queries(group, cfg["stat_period"])
+        if not queries:
+            continue
 
-    if alb_dimension:
-        metrics["alb"] = {
-            "request_count":  _parse_metric_result(results, "alb_requests"),
-            "response_time":  _parse_metric_result(results, "alb_response_time"),
-            "error_5xx":      _parse_metric_result(results, "alb_5xx"),
-        }
+        try:
+            cw = _get_cloudwatch_client(aws_account.role_arn, region, str(project.user_id))
+            response = cw.get_metric_data(
+                MetricDataQueries=queries,
+                StartTime=start_time,
+                EndTime=now,
+            )
+            results = response.get("MetricDataResults", [])
+        except Exception as e:
+            if len(region_groups) == 1:
+                # 단일 리전(craftops_deploy 표준 흐름)에서는 기존처럼 에러를 표면화한다.
+                raise HTTPException(status_code=502, detail=f"CloudWatch 조회 실패: {str(e)}")
+            print(f"[metrics] {region} CloudWatch 조회 실패: {e}")
+            continue
 
-    if rds_identifier:
-        rds_storage_raw = _parse_metric_result(results, "rds_storage")
-        rds_storage_gb = [
-            {"timestamp": p["timestamp"], "value": round(p["value"] / (1024**3), 2)}
-            for p in rds_storage_raw
-        ]
-        metrics["rds"] = {
-            "cpu":             _parse_metric_result(results, "rds_cpu"),
-            "connections":     _parse_metric_result(results, "rds_connections"),
-            "storage_free_gb": rds_storage_gb,
-        }
+        if group.get("ecs_cluster") and group.get("ecs_service"):
+            metrics["ecs"] = {
+                "cpu":    _parse_metric_result(results, "ecs_cpu"),
+                "memory": _parse_metric_result(results, "ecs_memory"),
+            }
+
+        if group.get("alb_dimension"):
+            metrics["alb"] = {
+                "request_count":  _parse_metric_result(results, "alb_requests"),
+                "response_time":  _parse_metric_result(results, "alb_response_time"),
+                "error_5xx":      _parse_metric_result(results, "alb_5xx"),
+            }
+
+        if group.get("rds_identifier"):
+            rds_storage_raw = _parse_metric_result(results, "rds_storage")
+            rds_storage_gb = [
+                {"timestamp": p["timestamp"], "value": round(p["value"] / (1024**3), 2)}
+                for p in rds_storage_raw
+            ]
+            metrics["rds"] = {
+                "cpu":             _parse_metric_result(results, "rds_cpu"),
+                "connections":     _parse_metric_result(results, "rds_connections"),
+                "storage_free_gb": rds_storage_gb,
+            }
+
+    used_regions = sorted(region_groups.keys())
+    response_region = used_regions[0] if len(used_regions) == 1 else ",".join(used_regions) or project.region
 
     return {
         "project_id": project_id,
         "period": period,
-        "region": project.region,
+        "region": response_region,
         "resources": {
             "ecs_cluster": ecs_cluster_name,
             "ecs_service": ecs_service_name,

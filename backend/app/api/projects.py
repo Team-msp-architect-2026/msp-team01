@@ -135,9 +135,15 @@ def get_project(
     } if latest_package else None
 
     from app.models.aws_resource import AWSResource
-    result["aws_resource_count"] = db.query(AWSResource).filter(
-        AWSResource.project_id == project_id
-    ).count()
+    from app.models.governance import ResourceBaseline
+    if project.source == "onboarding":
+        result["aws_resource_count"] = db.query(ResourceBaseline).filter(
+            ResourceBaseline.project_id == project_id
+        ).count()
+    else:
+        result["aws_resource_count"] = db.query(AWSResource).filter(
+            AWSResource.project_id == project_id
+        ).count()
     return {"success": True, "data": result}
 
 
@@ -303,6 +309,7 @@ def _get_project_or_404(project_id: str, user_id: str, db: Session) -> Project:
 def _project_to_dict(project: Project) -> dict:
     return {
         "project_id":       project.project_id,
+        "account_id":       project.account_id,
         "name":             project.name,
         "prefix":           project.prefix,
         "environment":      project.environment,
