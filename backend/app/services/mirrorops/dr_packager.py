@@ -46,7 +46,7 @@ class DRPackager:
 
         # ② RDS CreateSnapshot 호출
         snapshot_id  = f"autoops-{project_id[:8]}-{int(datetime.now().timestamp())}"
-        rds_id       = f"{prefix}-{environment}-rds"
+        rds_id       = f"{prefix}-{environment}-rds".lower()
         snapshot_arn = self._create_rds_snapshot(rds_id, snapshot_id)
 
         snapshot_ref = {
@@ -197,7 +197,7 @@ class DRPackager:
 
             account_id = self.user_session.client("sts").get_caller_identity()["Account"]
 
-            ecr_uri = f"{account_id}.dkr.ecr.us-west-2.amazonaws.com/autoops-sample-app:latest".lower()
+            ecr_uri = f"611058323802.dkr.ecr.us-west-2.amazonaws.com/autoops-sample-app:latest"
             gcr_uri = (
                 f"us-west1-docker.pkg.dev/{gcp_project}"
                 f"/autoops-repo/autoops-sample-app:latest"

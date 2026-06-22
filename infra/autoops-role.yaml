@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AutoOps Cross-Account IAM Role + Governance Setup
+Parameters:
+  ExternalId:
+    Type: String
+    Description: AutoOps User ID (ExternalId for AssumeRole)
+  AutoOpsAccountId:
+    Type: String
+    Description: AutoOps Platform AWS Account ID
+    Default: '611058323802'
+  PlatformDriftSQSArn:
+    Type: String
+    Description: AutoOps Platform Drift SQS ARN
+    Default: 'arn:aws:sqs:us-west-2:611058323802:autoops-drift-events'
+  PlatformMirrorOpsSQSArn:
+    Type: String
+    Description: AutoOps Platform MirrorOps SQS ARN
+    Default: 'arn:aws:sqs:us-west-2:611058323802:autoops-mirrorops-trigger'
+
+Resources:
+  # ── AutoOps 크로스 계정 역할 ──────────────────────────────────────
+  AutoOpsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AutoOpsRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AutoOpsAccountId}:role/AutoOpsTaskRole'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: AutoOpsIAMPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:TagInstanceProfile
+                  - iam:UntagInstanceProfile
+                  - iam:GetRole
+                  - iam:ListRoles
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:UpdateRole
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:ListInstanceProfiles
+                  - iam:ListInstanceProfilesForRole
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                Resource: '*'
+
+  # ── RDS Export 역할 ───────────────────────────────────────────────
+  AutoOpsRDSExportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AutoOpsRDSExportRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: export.rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AutoOpsRDSExportPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                  - s3:GetBucketLocation
+                Resource:
+                  - arn:aws:s3:::autoops-dr-packages
+                  - arn:aws:s3:::autoops-dr-packages/*
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt AutoOpsRDSExportKMSKey.Arn
+
+  # ── EventBridge → SQS 전송 역할 ──────────────────────────────────
+  AutoOpsDriftEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AutoOpsDriftEventRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowSQSSend
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  - !Ref PlatformDriftSQSArn
+                  - !Ref PlatformMirrorOpsSQSArn
+
+  # ── KMS Key (RDS Export 암호화용) ─────────────────────────────────
+  AutoOpsRDSExportKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: AutoOps RDS Export Encryption Key
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowRDSExportRole
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt AutoOpsRDSExportRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+
+  AutoOpsRDSExportKMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/autoops-rds-export
+      TargetKeyId: !Ref AutoOpsRDSExportKMSKey
+
+  # ── EventBridge Rule — Drift 감지 ─────────────────────────────────
+  AutoOpsDriftDetectionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: autoops-drift-detection
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - Config Configuration Item Change
+      State: ENABLED
+      Targets:
+        - Id: DriftSQS
+          Arn: !Ref PlatformDriftSQSArn
+          RoleArn: !GetAtt AutoOpsDriftEventRole.Arn
+
+  # ── EventBridge Rule — RDS 스냅샷 완료 ───────────────────────────
+  AutoOpsRDSSnapshotCompleteRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: autoops-rds-snapshot-complete
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Snapshot Event
+        detail:
+          EventCategories:
+            - creation
+      State: ENABLED
+      Targets:
+        - Id: MirrorOpsSQS
+          Arn: !Ref PlatformMirrorOpsSQSArn
+          RoleArn: !GetAtt AutoOpsDriftEventRole.Arn
+
+Outputs:
+  AutoOpsRoleArn:
+    Description: AutoOps Cross-Account Role ARN
+    Value: !GetAtt AutoOpsRole.Arn
+    Export:
+      Name: AutoOpsRoleArn
+  AutoOpsRDSExportRoleArn:
+    Description: AutoOps RDS Export Role ARN
+    Value: !GetAtt AutoOpsRDSExportRole.Arn
+    Export:
+      Name: AutoOpsRDSExportRoleArn
+  AutoOpsDriftEventRoleArn:
+    Description: AutoOps Drift Event Role ARN
+    Value: !GetAtt AutoOpsDriftEventRole.Arn
+    Export:
+      Name: AutoOpsDriftEventRoleArn
+  AutoOpsRDSExportKMSKeyArn:
+    Description: AutoOps RDS Export KMS Key ARN
+    Value: !GetAtt AutoOpsRDSExportKMSKey.Arn
+    Export:
+      Name: AutoOpsRDSExportKMSKeyArn

@@ -143,7 +143,6 @@ def get_onboard_status(
 def confirm_onboard(
     account_id: str,
     body: dict,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -153,49 +152,96 @@ def confirm_onboard(
     if not scan or scan.status != "pending_confirm":
         raise HTTPException(status_code=400, detail={"code": "BAD_REQUEST", "message": "확정 가능한 스캔이 없습니다."})
 
-    groups     = body.get("groups", scan.scan_result)
-    project_id = scan.project_id
+    account = db.query(AWSAccount).filter(AWSAccount.account_id == account_id).first()
+    groups  = body.get("groups", scan.scan_result)
 
-    baselines_created = 0
-    for group_key, group_data in groups.items():
-        for resource in group_data.get("resources", []):
+    # 리전별로 리소스 묶기
+    region_resources: dict[str, list] = {}
+    for group_data in groups.values():
+        region = group_data.get("region")
+        if not region:
+            continue
+        region_resources.setdefault(region, []).extend(group_data.get("resources", []))
+
+    created_projects = []
+    total_baselines  = 0
+
+    for region, resources in region_resources.items():
+        if not resources:
+            continue
+
+        new_project = Project(
+            project_id  = str(uuid.uuid4()),
+            user_id     = current_user.user_id,
+            account_id  = account_id,
+            name        = f"onboard-{account.aws_account_id}-{region}",
+            prefix      = "onboard",
+            environment = "existing",
+            region      = region,
+            status      = "completed",
+            dr_status   = "not_ready",
+            source      = "onboarding",
+        )
+        db.add(new_project)
+        db.flush()  # project_id 확보
+
+        # 모니터링 게이트용 OnboardingScan
+        new_scan = OnboardingScan(
+            id              = str(uuid.uuid4()),
+            project_id      = new_project.project_id,
+            account_id      = account.aws_account_id,
+            status          = "completed",
+            confirmed_at    = datetime.utcnow(),
+            total_resources = len(resources),
+            scanned_regions = [region],
+        )
+        db.add(new_scan)
+
+        for resource in resources:
             baseline = ResourceBaseline(
                 id              = str(uuid.uuid4()),
-                project_id      = project_id,
+                project_id      = new_project.project_id,
                 source          = "onboarding",
                 resource_type   = resource["resource_type"],
                 resource_id_aws = resource["resource_id"],
                 baseline_config = resource,
             )
             db.add(baseline)
-            baselines_created += 1
+            total_baselines += 1
 
-    scan.status       = "completed"
-    scan.confirmed_at = datetime.utcnow()
+        created_projects.append({
+            "project_id":     new_project.project_id,
+            "region":         region,
+            "resource_count": len(resources),
+        })
+
+    # 원본 임시 scan → project 순으로 삭제 (FK 순서)
+    original_project_id = scan.project_id
+    db.delete(scan)
+    db.flush()
+    temp_project = db.query(Project).filter(Project.project_id == original_project_id).first()
+    if temp_project:
+        db.delete(temp_project)
+
     db.commit()
 
-    # Audit Log 기록 추가
     log_platform_action(
         db         = db,
         action     = "onboarding_complete",
         user_id    = current_user.user_id,
-        project_id = project_id,
-        detail     = {"baselines_created": baselines_created},
+        project_id = created_projects[0]["project_id"] if created_projects else original_project_id,
+        detail     = {
+            "baselines_created": total_baselines,
+            "regions":           [p["region"] for p in created_projects],
+        },
     )
     db.commit()
-
-    from app.api.diagram import _generate_diagram_task
-    background_tasks.add_task(
-        _generate_diagram_task,
-        project_id = project_id,
-        source     = "onboarding",
-    )
 
     return {
         "success": True,
         "data": {
-            "project_id":        project_id,
-            "baselines_created": baselines_created,
+            "projects":          created_projects,
+            "baselines_created": total_baselines,
             "status":            "completed",
         },
     }

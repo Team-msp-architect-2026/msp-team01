@@ -13,10 +13,21 @@ NOT_REQUIRED_RESOURCES = {
 
 
 # ── terraform 참조 헬퍼 ──────────────────────────────────────────────
+def _get_name_tag(cfg: dict) -> str:
+    """boto3 응답의 tags (list 또는 dict) 에서 Name 태그 값 추출"""
+    tags = cfg.get("tags") or cfg.get("Tags") or []
+    if isinstance(tags, list):
+        for tag in tags:
+            if tag.get("Key") == "Name":
+                return tag.get("Value", "")
+    elif isinstance(tags, dict):
+        return tags.get("Name", "")
+    return ""
+
 
 def _vpc_ref(cfg: dict) -> str:
     """이름 태그에서 VPC terraform 참조 생성 (network 필드용)"""
-    name_tag = (cfg.get("tags") or {}).get("Name", "")
+    name_tag = _get_name_tag(cfg)
     if name_tag:
         vpc_name = "-".join(name_tag.lower().replace("_", "-").split("-")[:2]) + "-vpc"
     else:
@@ -26,7 +37,7 @@ def _vpc_ref(cfg: dict) -> str:
 
 def _router_ref(cfg: dict) -> str:
     """이름 태그에서 Router terraform 참조 생성 (NAT router 필드용)"""
-    name_tag = (cfg.get("tags") or {}).get("Name", "")
+    name_tag = _get_name_tag(cfg)
     if name_tag:
         router_name = "-".join(name_tag.lower().replace("_", "-").split("-")[:2]) + "-rt-public"
     else:
@@ -41,8 +52,8 @@ RULE_BASED_MAP: dict[str, dict] = {
         "confidence": "auto",
         "mapping":    lambda cfg: {
             "name": (
-                (cfg.get("tags") or {}).get("Name", "") or
-                cfg.get("vpcId", "default-vpc")
+                _get_name_tag(cfg) or
+                cfg.get("VpcId") or cfg.get("vpcId", "default-vpc")
             ).lower().replace("_", "-"),
             "auto_create_subnetworks": False,
             "routing_mode":            "REGIONAL",
@@ -53,10 +64,10 @@ RULE_BASED_MAP: dict[str, dict] = {
         "confidence": "auto",
         "mapping":    lambda cfg: {
             "name": (
-                (cfg.get("tags") or {}).get("Name", "") or
-                cfg.get("subnetId", "default-subnet")
+                _get_name_tag(cfg) or
+                cfg.get("SubnetId") or cfg.get("subnetId", "default-subnet")
             ).lower().replace("_", "-"),
-            "ip_cidr_range": cfg.get("cidrBlock", ""),
+            "ip_cidr_range": cfg.get("CidrBlock") or cfg.get("cidrBlock", "10.0.0.0/24"),
             "region":        "us-west1",
             # [수정] terraform 참조 — VPC 생성 완료 후 서브넷 생성되도록 의존성 설정
             "network": _vpc_ref(cfg),
@@ -67,8 +78,8 @@ RULE_BASED_MAP: dict[str, dict] = {
         "confidence": "auto",
         "mapping":    lambda cfg: {
             "name": (
-                (cfg.get("tags") or {}).get("Name", "") or
-                "router-" + cfg.get("routeTableId", "default")
+                _get_name_tag(cfg) or
+                "router-" + (cfg.get("RouteTableId") or cfg.get("routeTableId", "default"))
             ).lower().replace("_", "-"),
             "region": "us-west1",
             # [수정] terraform 참조
@@ -80,7 +91,7 @@ RULE_BASED_MAP: dict[str, dict] = {
         "confidence": "auto",
         "mapping":    lambda cfg: {
             "name": (
-                (cfg.get("tags") or {}).get("Name", "") or
+                _get_name_tag(cfg) or
                 "cloud-nat"
             ).lower().replace("_", "-"),
             # [수정] terraform 참조 — Router 생성 완료 후 NAT 생성되도록 의존성 설정
@@ -296,10 +307,16 @@ class MappingEngine:
     protocol = "{rule.get('protocol', 'all')}"{ports_line}
   }}"""
 
-        source_ranges = json.dumps(
+        raw_ranges = (
             rules[0].get("source_ranges", ["0.0.0.0/0"])
             if rules and isinstance(rules[0], dict) else ["0.0.0.0/0"]
         )
+        # AWS SG ID(sg-xxx) 또는 PL ID(pl-xxx) 필터링 → CIDR만 허용
+        cidr_ranges = [
+            r for r in raw_ranges
+            if r and not r.startswith("sg-") and not r.startswith("pl-")
+        ] or ["0.0.0.0/0"]
+        source_ranges = json.dumps(cidr_ranges)
 
         return f'''resource "google_compute_firewall" "{tf_name}" {{
   name          = "{gcp_name}"
@@ -350,7 +367,7 @@ class MappingEngine:
       containers {{
         image = "{image}"
         ports {{
-          container_port = {port}
+          container_port = {port or 8080}
         }}
         resources {{
           limits = {{

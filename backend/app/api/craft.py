@@ -991,6 +991,15 @@ def rescan_resources(
             detail={"code": "NOT_FOUND", "message": "연동된 AWS 계정을 찾을 수 없습니다."},
         )
 
+    if project.gcp_project_id:
+        return {
+            "success": True,
+            "data": {
+                "project_id": project_id,
+                "message": "GCP 연동 프로젝트는 MirrorOps 동기화를 통해 리소스가 갱신됩니다.",
+            },
+        }
+
     background_tasks.add_task(
         _run_detect_all,
         project_id  = project.project_id,

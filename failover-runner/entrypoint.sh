@@ -103,5 +103,12 @@ if [ "${TF_EXIT}" -eq 0 ]; then
           -H "X-Internal-Secret: ${INTERNAL_SECRET}" \
           -d "{\"action\":\"${ACTION}\",\"status\":\"success\",\"resources_created\":${RESOURCES_ADDED}}"
     fi
+else
+    _log "❌ terraform ${ACTION} 실패 (exit code: ${TF_EXIT})"
+    curl -s -X POST "${BACKEND_API_URL}/api/mirror/${PROJECT_ID}/failover/${FAILOVER_ID}/internal-complete" \
+      -H "Content-Type: application/json" \
+      -H "X-Internal-Secret: ${INTERNAL_SECRET}" \
+      -d "{\"action\":\"${ACTION}\",\"status\":\"failed\"}"
+fi
 
 echo "[Failover Runner] 완료"
