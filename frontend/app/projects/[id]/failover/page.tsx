@@ -29,11 +29,18 @@ export default function FailoverPage() {
 
   const { data: packageData } = useDRPackage(projectId)
   const latest = packageData?.latest
+  const [completedFailover, setCompletedFailover] = useState<{failover_id: string, status: string} | null>(null)
 
   useEffect(() => {
     apiClient
-      .get(`/api/projects/${projectId}`)
-      .then((res) => setProjectName(res.data.data.name))
+      .get(`/api/mirror/${projectId}/failover-history`)
+      .then((res) => {
+        const history = res.data.data
+        const active = history.find((fh: any) =>
+          ['completed', 'destroy_failed', 'destroying'].includes(fh.status)
+        )
+        if (active) setCompletedFailover(active)
+      })
       .catch(() => {})
   }, [projectId])
 
@@ -445,7 +452,7 @@ export default function FailoverPage() {
         )}
 
         {/* ── actual 완료/실패 후 ─────────────── */}
-        {!isRunning && mode === 'actual' && logs.length > 0 && (
+        {!isRunning && mode === 'actual' && (logs.length > 0 || completedFailover) && (
           <div className="fo-stack">
 
             {/* 결과 로그 */}
