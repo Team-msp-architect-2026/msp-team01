@@ -384,3 +384,5 @@ async def get_project_metrics(
         },
         "metrics": metrics,
     }
+
+# ------ CI/CD demo 트리거 -------
